@@ -53,8 +53,24 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet ## Run tests.
+test: generate fmt vet ## Run tests.
 	go test ./... -coverprofile cover.out
+
+.PHONY: test-unit
+test-unit: ## Run unit tests only.
+	go test ./... -v -short
+
+.PHONY: lint
+lint: golangci-lint ## Run golangci-lint.
+	$(GOLANGCI_LINT) run
+
+.PHONY: verify-generate
+verify-generate: generate ## Verify that generated code is up to date.
+	@git diff --exit-code || (echo "Error: Generated code is out of date. Run 'make generate' and commit the changes." && exit 1)
+
+.PHONY: verify-manifests
+verify-manifests: manifests ## Verify that manifests are up to date.
+	@git diff --exit-code config/crd/bases config/rbac || (echo "Error: Manifests are out of date. Run 'make manifests' and commit the changes." && exit 1)
 
 ##@ Build
 
@@ -107,9 +123,11 @@ $(LOCALBIN):
 ## Tool Binaries
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
+GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
 
 ## Tool Versions
 CONTROLLER_TOOLS_VERSION ?= v0.17.0
+GOLANGCI_LINT_VERSION ?= v1.60.0
 
 .PHONY: controller-gen
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.
@@ -120,6 +138,11 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)
 	test -s $(LOCALBIN)/kustomize || GOBIN=$(LOCALBIN) go install sigs.k8s.io/kustomize/kustomize/v5@latest
+
+.PHONY: golangci-lint
+golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
+$(GOLANGCI_LINT): $(LOCALBIN)
+	test -s $(LOCALBIN)/golangci-lint || curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(LOCALBIN) $(GOLANGCI_LINT_VERSION)
 
 .PHONY: tidy
 tidy: ## Run go mod tidy

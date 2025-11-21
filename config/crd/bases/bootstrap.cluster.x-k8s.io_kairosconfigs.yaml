@@ -105,11 +105,11 @@ spec:
                 x-kubernetes-map-type: atomic
               distribution:
                 default: k0s
-                description: Distribution specifies the Kubernetes distribution to
-                  install
+                description: |-
+                  Distribution specifies the Kubernetes distribution to install
+                  Currently only k0s is supported. k3s support is planned for future releases.
                 enum:
                 - k0s
-                - k3s
                 type: string
               files:
                 description: Files specifies additional files to include in the cloud-config
@@ -148,18 +148,24 @@ spec:
               manifests:
                 description: |-
                   Manifests are Kubernetes manifests to be placed in /var/lib/k0s/manifests/
-                  These will be automatically applied by k0s
+                  These will be automatically applied by k0s at cluster startup.
+                  Each manifest is placed at /var/lib/k0s/manifests/{Name}/{File}
                 items:
-                  description: Manifest represents a Kubernetes manifest file
+                  description: |-
+                    Manifest represents a Kubernetes manifest file to be deployed by k0s
+                    The manifest will be placed at /var/lib/k0s/manifests/{Name}/{File} and automatically
+                    applied by k0s when the cluster starts.
                   properties:
                     content:
                       description: Content is the manifest YAML content
                       type: string
                     file:
-                      description: File is the filename
+                      description: File is the filename within the Name directory
                       type: string
                     name:
-                      description: Name is the directory name under /var/lib/k0s/manifests/
+                      description: |-
+                        Name is the directory name under /var/lib/k0s/manifests/
+                        This creates a directory structure: /var/lib/k0s/manifests/{Name}/{File}
                       type: string
                   required:
                   - content
@@ -262,13 +268,41 @@ spec:
                 type: string
               userPassword:
                 default: kairos
-                description: UserPassword is the password for the default user
+                description: |-
+                  UserPassword is the password for the default user
+                  Defaults to "kairos" if not specified.
+                  WARNING: This default is for development only and is NOT production-safe.
+                  For production use, always set a strong password.
                 type: string
               workerToken:
                 description: |-
-                  WorkerToken is the join token for worker nodes
-                  Alternative to TokenSecretRef for inline token specification
+                  WorkerToken is the join token for worker nodes (inline specification)
+                  For production use, prefer WorkerTokenSecretRef instead.
+                  If both WorkerToken and WorkerTokenSecretRef are set, WorkerTokenSecretRef takes precedence.
                 type: string
+              workerTokenSecretRef:
+                description: |-
+                  WorkerTokenSecretRef is a reference to a Secret containing the worker join token
+                  This is the recommended way to provide worker tokens for security.
+                  The Secret must contain a key specified by WorkerTokenSecretRef.Key (defaults to "token").
+                properties:
+                  key:
+                    default: token
+                    description: |-
+                      Key is the key within the Secret that contains the token
+                      Defaults to "token" if not specified
+                    type: string
+                  name:
+                    description: Name is the name of the Secret
+                    type: string
+                  namespace:
+                    description: |-
+                      Namespace is the namespace of the Secret
+                      If not specified, defaults to the same namespace as the KairosConfig
+                    type: string
+                required:
+                - name
+                type: object
             required:
             - kubernetesVersion
             type: object

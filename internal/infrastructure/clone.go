@@ -50,23 +50,23 @@ func getTemplateObject(ctx context.Context, c client.Client, ref corev1.ObjectRe
 	// Get the full template object as unstructured
 	fullObj := &unstructured.Unstructured{}
 	fullObj.SetGroupVersionKind(ref.GroupVersionKind())
-	
+
 	key := client.ObjectKey{
 		Namespace: ref.Namespace,
 		Name:      ref.Name,
 	}
-	
+
 	if err := c.Get(ctx, key, fullObj); err != nil {
 		return nil, err
 	}
-	
+
 	return fullObj, nil
 }
 
 func cloneDockerMachineTemplate(ctx context.Context, c client.Client, scheme *runtime.Scheme, template *unstructured.Unstructured, machineName, namespace string, labels, annotations map[string]string) (client.Object, error) {
 	// For CAPD, we create a DockerMachine from DockerMachineTemplate
 	// This is a simplified version - in production, you'd use the actual CAPD types
-	
+
 	// Create unstructured DockerMachine
 	dockerMachine := &unstructured.Unstructured{}
 	dockerMachine.SetGroupVersionKind(schema.GroupVersionKind{
@@ -74,45 +74,44 @@ func cloneDockerMachineTemplate(ctx context.Context, c client.Client, scheme *ru
 		Version: "v1beta1",
 		Kind:    "DockerMachine",
 	})
-	
+
 	dockerMachine.SetName(machineName)
 	dockerMachine.SetNamespace(namespace)
 	dockerMachine.SetLabels(labels)
 	dockerMachine.SetAnnotations(annotations)
-	
+
 	// Copy spec from template
 	if spec, ok, _ := unstructured.NestedMap(template.UnstructuredContent(), "spec", "template", "spec"); ok {
 		if err := unstructured.SetNestedMap(dockerMachine.UnstructuredContent(), spec, "spec"); err != nil {
 			return nil, fmt.Errorf("failed to set spec: %w", err)
 		}
 	}
-	
+
 	return dockerMachine, nil
 }
 
 func cloneVSphereMachineTemplate(ctx context.Context, c client.Client, scheme *runtime.Scheme, template *unstructured.Unstructured, machineName, namespace string, labels, annotations map[string]string) (client.Object, error) {
 	// For CAPV, we create a VSphereMachine from VSphereMachineTemplate
 	// This is a simplified version - in production, you'd use the actual CAPV types
-	
+
 	vsphereMachine := &unstructured.Unstructured{}
 	vsphereMachine.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "infrastructure.cluster.x-k8s.io",
 		Version: "v1beta1",
 		Kind:    "VSphereMachine",
 	})
-	
+
 	vsphereMachine.SetName(machineName)
 	vsphereMachine.SetNamespace(namespace)
 	vsphereMachine.SetLabels(labels)
 	vsphereMachine.SetAnnotations(annotations)
-	
+
 	// Copy spec from template
 	if spec, ok, _ := unstructured.NestedMap(template.UnstructuredContent(), "spec", "template", "spec"); ok {
 		if err := unstructured.SetNestedMap(vsphereMachine.UnstructuredContent(), spec, "spec"); err != nil {
 			return nil, fmt.Errorf("failed to set spec: %w", err)
 		}
 	}
-	
+
 	return vsphereMachine, nil
 }
-

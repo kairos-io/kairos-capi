@@ -20,11 +20,14 @@ The Bootstrap Provider implements the BootstrapConfig contract (v1beta2) and gen
 
 #### Key Fields
 
-- `spec.role`: `"control-plane"` | `"worker"`
-- `spec.distribution`: `"k0s"` | `"k3s"` (MVP: k0s only)
-- `spec.kubernetesVersion`: Kubernetes version to install
-- `spec.serverAddress`: API server address (for worker nodes)
-- `spec.token` / `spec.tokenSecretRef`: Join token for worker nodes
+- `spec.role`: `"control-plane"` | `"worker"` (required, validated via enum)
+- `spec.distribution`: `"k0s"` (currently only k0s supported; k3s planned for future)
+- `spec.kubernetesVersion`: Kubernetes version to install (required)
+- `spec.singleNode`: Boolean indicating single-node control plane mode
+- `spec.userName`, `spec.userPassword`, `spec.userGroups`: User configuration (defaults: kairos/kairos/admin)
+- `spec.githubUser` / `spec.sshPublicKey`: SSH access configuration
+- `spec.workerToken` / `spec.workerTokenSecretRef`: Worker join token (WorkerTokenSecretRef preferred for security)
+- `spec.manifests`: Kubernetes manifests to deploy via k0s
 
 #### Contract Compliance
 
@@ -34,13 +37,17 @@ The Bootstrap Provider implements the BootstrapConfig contract (v1beta2) and gen
 
 #### Cloud-Config Generation
 
-The controller generates Kairos cloud-config that:
+The controller generates Kairos cloud-config using Kairos's native k0s integration:
 
-1. Installs k0s using the official installer script
-2. Configures k0s based on role:
-   - **Control-plane**: Creates k0s controller configuration and starts k0scontroller service
-   - **Worker**: Uses join token and server address to join existing cluster
-3. Supports pre/post commands and file writes via Kairos stages
+1. Uses `k0s:` block for control-plane nodes (with optional `--single` for single-node mode)
+2. Uses `k0s-worker:` block for worker nodes with token file
+3. Configures users with SSH keys (GitHub or raw public key)
+4. Writes worker tokens to `/etc/k0s/token` via `write_files`
+5. Deploys Kubernetes manifests to `/var/lib/k0s/manifests/` for automatic application
+
+Single-node mode is determined by:
+- `KairosConfig.spec.singleNode` (explicit flag), OR
+- `KairosControlPlane.spec.replicas == 1` (automatically set by control plane controller)
 
 ### Control Plane Provider
 
@@ -53,10 +60,14 @@ The Control Plane Provider implements the ControlPlane contract (v1beta2) and ma
 
 #### Key Fields
 
-- `spec.replicas`: Number of control plane machines (MVP: 1)
-- `spec.version`: Kubernetes version
-- `spec.machineTemplate.infrastructureRef`: Reference to infrastructure template
-- `spec.kairosConfigTemplate`: Reference to KairosConfigTemplate
+- `spec.replicas`: Number of control plane machines (required, min=1, default=1)
+  - When `replicas == 1`: Single-node mode, k0s configured with `--single`
+  - When `replicas > 1`: Multi-node mode (HA support planned)
+- `spec.version`: Kubernetes version (required)
+- `spec.machineTemplate.infrastructureRef`: Reference to infrastructure template (required)
+- `spec.kairosConfigTemplate`: Reference to KairosConfigTemplate (required)
+
+The controller automatically sets `KairosConfig.spec.singleNode` based on `spec.replicas` when creating control plane machines.
 
 #### Contract Compliance
 

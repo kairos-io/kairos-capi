@@ -168,7 +168,10 @@ spec:
                 description: |-
                   Replicas is the number of control plane machines
                   Contract: ControlPlane MUST expose replicas
+                  When replicas == 1, the control plane operates in single-node mode and k0s will be
+                  configured with --single flag. For HA setups, set replicas > 1 (full HA support is planned).
                 format: int32
+                minimum: 1
                 type: integer
               rolloutStrategy:
                 description: RolloutStrategy defines the strategy for rolling out

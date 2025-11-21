@@ -1,0 +1,71 @@
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: kairos-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: DockerCluster
+    name: kairos-cluster
+  controlPlaneRef:
+    apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+    kind: KairosControlPlane
+    name: kairos-control-plane
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: DockerCluster
+metadata:
+  name: kairos-cluster
+  namespace: default
+---
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: KairosControlPlane
+metadata:
+  name: kairos-control-plane
+  namespace: default
+spec:
+  replicas: 1
+  version: "v1.30.0+k0s.0"
+  machineTemplate:
+    infrastructureRef:
+      apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+      kind: DockerMachineTemplate
+      name: kairos-control-plane-template
+      namespace: default
+  kairosConfigTemplate:
+    name: kairos-config-template-control-plane
+    namespace: default
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: DockerMachineTemplate
+metadata:
+  name: kairos-control-plane-template
+  namespace: default
+spec:
+  template:
+    spec:
+      # Custom image can be specified here
+      # For Kairos, you would use a Kairos-based image
+      # Example: image: "quay.io/kairos/kairos-opensuse-leap:latest"
+---
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+kind: KairosConfigTemplate
+metadata:
+  name: kairos-config-template-control-plane
+  namespace: default
+spec:
+  template:
+    spec:
+      role: control-plane
+      distribution: k0s
+      kubernetesVersion: "v1.30.0+k0s.0"
+      userName: kairos
+      userPassword: kairos
+      userGroups:
+        - admin
+      # Optional: Add GitHub user for SSH access
+      # githubUser: "your-github-username"
+      # Optional: Add SSH public key instead
+      # sshPublicKey: "ssh-rsa AAAAB3NzaC1yc2E..."
+

@@ -85,4 +85,3 @@ func RenderK0sCloudConfig(data TemplateData) (string, error) {
 
 	return buf.String(), nil
 }
-

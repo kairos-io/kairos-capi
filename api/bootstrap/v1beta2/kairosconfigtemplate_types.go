@@ -60,4 +60,3 @@ type KairosConfigTemplateList struct {
 func init() {
 	SchemeBuilder.Register(&KairosConfigTemplate{}, &KairosConfigTemplateList{})
 }
-

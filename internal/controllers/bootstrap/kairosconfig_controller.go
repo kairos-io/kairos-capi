@@ -126,11 +126,11 @@ func (r *KairosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		conditions.MarkFalse(kairosConfig, clusterv1.ReadyCondition, bootstrapv1beta2.BootstrapDataSecretGenerationFailedReason, clusterv1.ConditionSeverityWarning, err.Error())
 		conditions.MarkFalse(kairosConfig, bootstrapv1beta2.BootstrapReadyCondition, bootstrapv1beta2.BootstrapDataSecretGenerationFailedReason, clusterv1.ConditionSeverityWarning, err.Error())
 		conditions.MarkFalse(kairosConfig, bootstrapv1beta2.DataSecretAvailableCondition, bootstrapv1beta2.BootstrapDataSecretGenerationFailedReason, clusterv1.ConditionSeverityWarning, err.Error())
-		
+
 		kairosConfig.Status.FailureReason = bootstrapv1beta2.BootstrapDataSecretGenerationFailedReason
 		kairosConfig.Status.FailureMessage = err.Error()
 		kairosConfig.Status.Ready = false
-		
+
 		return ctrl.Result{}, helper.Patch(ctx, kairosConfig)
 	}
 
@@ -138,7 +138,7 @@ func (r *KairosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	conditions.MarkTrue(kairosConfig, clusterv1.ReadyCondition)
 	conditions.MarkTrue(kairosConfig, bootstrapv1beta2.BootstrapReadyCondition)
 	conditions.MarkTrue(kairosConfig, bootstrapv1beta2.DataSecretAvailableCondition)
-	
+
 	// Clear failure fields
 	kairosConfig.Status.FailureReason = ""
 	kairosConfig.Status.FailureMessage = ""
@@ -276,33 +276,68 @@ func (r *KairosConfigReconciler) generateK0sCloudConfig(ctx context.Context, log
 		}
 	}
 
-	// Get worker token if needed
-	workerToken := kairosConfig.Spec.WorkerToken
-	if workerToken == "" {
-		workerToken = kairosConfig.Spec.Token
-	}
-	if workerToken == "" && kairosConfig.Spec.TokenSecretRef != nil {
-		secret := &corev1.Secret{}
-		secretKey := types.NamespacedName{
-			Namespace: cluster.Namespace,
-			Name:      kairosConfig.Spec.TokenSecretRef.Name,
-		}
-		if err := r.Get(ctx, secretKey, secret); err != nil {
-			return "", fmt.Errorf("failed to get token secret: %w", err)
-		}
-		// Try common token keys
-		if tokenData, ok := secret.Data["token"]; ok {
-			workerToken = string(tokenData)
-		} else if tokenData, ok := secret.Data["value"]; ok {
-			workerToken = string(tokenData)
-		} else {
-			return "", fmt.Errorf("token secret does not contain 'token' or 'value' key")
-		}
-	}
+	// Get worker token if needed (for worker nodes)
+	// Precedence: WorkerTokenSecretRef > WorkerToken > TokenSecretRef > Token
+	// TODO: Add validating webhook to enforce worker token requirement at API level
+	var workerToken string
+	if role == "worker" {
+		// Try WorkerTokenSecretRef first (most secure)
+		if kairosConfig.Spec.WorkerTokenSecretRef != nil {
+			secretKey := types.NamespacedName{
+				Namespace: kairosConfig.Namespace,
+				Name:      kairosConfig.Spec.WorkerTokenSecretRef.Name,
+			}
+			// Use specified namespace or fall back to KairosConfig namespace
+			if kairosConfig.Spec.WorkerTokenSecretRef.Namespace != "" {
+				secretKey.Namespace = kairosConfig.Spec.WorkerTokenSecretRef.Namespace
+			}
 
-	// Validate worker token for worker nodes
-	if role == "worker" && workerToken == "" {
-		return "", fmt.Errorf("worker token is required for worker nodes")
+			secret := &corev1.Secret{}
+			if err := r.Get(ctx, secretKey, secret); err != nil {
+				return "", fmt.Errorf("failed to get worker token secret %s/%s: %w", secretKey.Namespace, secretKey.Name, err)
+			}
+
+			// Use specified key or default to "token"
+			key := kairosConfig.Spec.WorkerTokenSecretRef.Key
+			if key == "" {
+				key = "token"
+			}
+
+			if tokenData, ok := secret.Data[key]; ok {
+				workerToken = string(tokenData)
+			} else {
+				return "", fmt.Errorf("worker token secret %s/%s does not contain key '%s'", secretKey.Namespace, secretKey.Name, key)
+			}
+		} else if kairosConfig.Spec.WorkerToken != "" {
+			// Fall back to inline WorkerToken
+			workerToken = kairosConfig.Spec.WorkerToken
+		} else if kairosConfig.Spec.TokenSecretRef != nil {
+			// Fall back to legacy TokenSecretRef
+			secret := &corev1.Secret{}
+			secretKey := types.NamespacedName{
+				Namespace: cluster.Namespace,
+				Name:      kairosConfig.Spec.TokenSecretRef.Name,
+			}
+			if err := r.Get(ctx, secretKey, secret); err != nil {
+				return "", fmt.Errorf("failed to get token secret: %w", err)
+			}
+			// Try common token keys
+			if tokenData, ok := secret.Data["token"]; ok {
+				workerToken = string(tokenData)
+			} else if tokenData, ok := secret.Data["value"]; ok {
+				workerToken = string(tokenData)
+			} else {
+				return "", fmt.Errorf("token secret does not contain 'token' or 'value' key")
+			}
+		} else if kairosConfig.Spec.Token != "" {
+			// Fall back to legacy Token
+			workerToken = kairosConfig.Spec.Token
+		}
+
+		// Validate worker token is present
+		if workerToken == "" {
+			return "", fmt.Errorf("worker token is required for worker nodes: either WorkerTokenSecretRef, WorkerToken, TokenSecretRef, or Token must be set")
+		}
 	}
 
 	// Set defaults for user configuration

@@ -1,0 +1,91 @@
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: test-k0s-cluster
+  namespace: default
+spec:
+  # For this smoke test, infraRef can be a dummy CAPD or left pointing to a simple DockerCluster
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: DockerCluster
+    name: test-k0s-docker-cluster
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: DockerCluster
+metadata:
+  name: test-k0s-docker-cluster
+  namespace: default
+spec: {}
+---
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Machine
+metadata:
+  name: test-k0s-cp-0
+  namespace: default
+  labels:
+    cluster.x-k8s.io/cluster-name: test-k0s-cluster
+    cluster.x-k8s.io/control-plane: "true"
+spec:
+  clusterName: test-k0s-cluster
+  bootstrap:
+    configRef:
+      apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+      kind: KairosConfig
+      name: test-k0s-cp-0-bootstrap
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: DockerMachine
+    name: test-k0s-cp-0-docker
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: DockerMachine
+metadata:
+  name: test-k0s-cp-0-docker
+  namespace: default
+spec: {}
+---
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+kind: KairosConfig
+metadata:
+  name: test-k0s-cp-0-bootstrap
+  namespace: default
+spec:
+  # adjust field names to match your actual KairosConfigSpec
+  role: control-plane
+  distribution: k0s
+  singleNode: true
+  userName: kairos
+  userPassword: kairos
+  userGroups:
+    - admin
+  gitHubUser: "your-github-user" # or leave empty and use sshPublicKey
+  # workerToken is not needed for control-plane
+  manifests:
+    - name: nginx
+      file: nginx.yaml
+      content: |
+        apiVersion: v1
+        kind: Namespace
+        metadata:
+          name: nginx
+        ---
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: nginx-deployment
+          namespace: nginx
+        spec:
+          selector:
+            matchLabels:
+              app: nginx
+          replicas: 3
+          template:
+            metadata:
+              labels:
+                app: nginx
+            spec:
+              containers:
+              - name: nginx
+                image: nginx:latest
+                ports:
+                - containerPort: 80

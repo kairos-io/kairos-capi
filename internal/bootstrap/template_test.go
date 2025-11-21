@@ -202,4 +202,3 @@ func TestRenderK0sCloudConfig_WithSSHPublicKey(t *testing.T) {
 		t.Error("Missing SSH public key")
 	}
 }
-

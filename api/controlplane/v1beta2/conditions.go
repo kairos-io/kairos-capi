@@ -42,4 +42,3 @@ const (
 	// ScalingDownReason indicates that the control plane is scaling down
 	ScalingDownReason = "ScalingDown"
 )
-

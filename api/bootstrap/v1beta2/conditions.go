@@ -45,4 +45,3 @@ const (
 	// BootstrapFailedReason indicates that bootstrap failed
 	BootstrapFailedReason = "BootstrapFailed"
 )
-

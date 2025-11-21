@@ -205,6 +205,14 @@ func (r *KairosControlPlaneReconciler) createControlPlaneMachine(ctx context.Con
 		},
 	}
 
+	// Determine single-node mode from replicas
+	replicas := int32(1)
+	if kcp.Spec.Replicas != nil {
+		replicas = *kcp.Spec.Replicas
+	}
+	kairosConfig.Spec.SingleNode = (replicas == 1)
+	log.Info("Setting SingleNode flag", "singleNode", kairosConfig.Spec.SingleNode, "replicas", replicas)
+
 	// If there's a template, merge its spec
 	if kcp.Spec.KairosConfigTemplate.Name != "" {
 		template := &bootstrapv1beta2.KairosConfigTemplate{}
@@ -219,6 +227,8 @@ func (r *KairosControlPlaneReconciler) createControlPlaneMachine(ctx context.Con
 		kairosConfig.Spec = template.Spec.Template.Spec
 		kairosConfig.Spec.Role = "control-plane"
 		kairosConfig.Spec.KubernetesVersion = kcp.Spec.Version
+		// Override SingleNode based on replicas (replicas takes precedence)
+		kairosConfig.Spec.SingleNode = (replicas == 1)
 	}
 
 	if err := r.Create(ctx, kairosConfig); err != nil {

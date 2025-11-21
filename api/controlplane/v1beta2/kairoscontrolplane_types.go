@@ -32,6 +32,9 @@ const (
 type KairosControlPlaneSpec struct {
 	// Replicas is the number of control plane machines
 	// Contract: ControlPlane MUST expose replicas
+	// When replicas == 1, the control plane operates in single-node mode and k0s will be
+	// configured with --single flag. For HA setups, set replicas > 1 (full HA support is planned).
+	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1
 	Replicas *int32 `json:"replicas,omitempty"`
 
@@ -205,4 +208,3 @@ func (c *KairosControlPlane) SetConditions(conditions clusterv1.Conditions) {
 func init() {
 	SchemeBuilder.Register(&KairosControlPlane{}, &KairosControlPlaneList{})
 }
-

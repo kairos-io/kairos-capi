@@ -60,4 +60,3 @@ type KairosControlPlaneTemplateList struct {
 func init() {
 	SchemeBuilder.Register(&KairosControlPlaneTemplate{}, &KairosControlPlaneTemplateList{})
 }
-

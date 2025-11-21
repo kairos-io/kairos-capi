@@ -36,7 +36,8 @@ type KairosConfigSpec struct {
 	Role string `json:"role,omitempty"`
 
 	// Distribution specifies the Kubernetes distribution to install
-	// +kubebuilder:validation:Enum=k0s;k3s
+	// Currently only k0s is supported. k3s support is planned for future releases.
+	// +kubebuilder:validation:Enum=k0s
 	// +kubebuilder:default=k0s
 	Distribution string `json:"distribution,omitempty"`
 
@@ -91,6 +92,9 @@ type KairosConfigSpec struct {
 	UserName string `json:"userName,omitempty"`
 
 	// UserPassword is the password for the default user
+	// Defaults to "kairos" if not specified.
+	// WARNING: This default is for development only and is NOT production-safe.
+	// For production use, always set a strong password.
 	// +kubebuilder:default=kairos
 	// +optional
 	UserPassword string `json:"userPassword,omitempty"`
@@ -109,26 +113,58 @@ type KairosConfigSpec struct {
 	// +optional
 	SSHPublicKey string `json:"sshPublicKey,omitempty"`
 
-	// WorkerToken is the join token for worker nodes
-	// Alternative to TokenSecretRef for inline token specification
+	// WorkerToken is the join token for worker nodes (inline specification)
+	// For production use, prefer WorkerTokenSecretRef instead.
+	// If both WorkerToken and WorkerTokenSecretRef are set, WorkerTokenSecretRef takes precedence.
 	// +optional
 	WorkerToken string `json:"workerToken,omitempty"`
 
+	// WorkerTokenSecretRef is a reference to a Secret containing the worker join token
+	// This is the recommended way to provide worker tokens for security.
+	// The Secret must contain a key specified by WorkerTokenSecretRef.Key (defaults to "token").
+	// +optional
+	WorkerTokenSecretRef *WorkerTokenSecretReference `json:"workerTokenSecretRef,omitempty"`
+
 	// Manifests are Kubernetes manifests to be placed in /var/lib/k0s/manifests/
-	// These will be automatically applied by k0s
+	// These will be automatically applied by k0s at cluster startup.
+	// Each manifest is placed at /var/lib/k0s/manifests/{Name}/{File}
 	// +optional
 	Manifests []Manifest `json:"manifests,omitempty"`
 }
 
-// Manifest represents a Kubernetes manifest file
-type Manifest struct {
-	// Name is the directory name under /var/lib/k0s/manifests/
+// WorkerTokenSecretReference is a reference to a Secret containing a worker join token
+type WorkerTokenSecretReference struct {
+	// Name is the name of the Secret
+	// +kubebuilder:validation:Required
 	Name string `json:"name"`
 
-	// File is the filename
+	// Key is the key within the Secret that contains the token
+	// Defaults to "token" if not specified
+	// +kubebuilder:default=token
+	// +optional
+	Key string `json:"key,omitempty"`
+
+	// Namespace is the namespace of the Secret
+	// If not specified, defaults to the same namespace as the KairosConfig
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// Manifest represents a Kubernetes manifest file to be deployed by k0s
+// The manifest will be placed at /var/lib/k0s/manifests/{Name}/{File} and automatically
+// applied by k0s when the cluster starts.
+type Manifest struct {
+	// Name is the directory name under /var/lib/k0s/manifests/
+	// This creates a directory structure: /var/lib/k0s/manifests/{Name}/{File}
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// File is the filename within the Name directory
+	// +kubebuilder:validation:Required
 	File string `json:"file"`
 
 	// Content is the manifest YAML content
+	// +kubebuilder:validation:Required
 	Content string `json:"content"`
 }
 
@@ -224,4 +260,3 @@ func (c *KairosConfig) SetConditions(conditions clusterv1.Conditions) {
 func init() {
 	SchemeBuilder.Register(&KairosConfig{}, &KairosConfigList{})
 }
-
