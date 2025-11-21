@@ -35,7 +35,7 @@ type Config struct {
 func LoadConfig() *Config {
 	cfg := &Config{
 		WatchNamespace: os.Getenv("WATCH_NAMESPACE"),
-		LogLevel:        getEnvOrDefault("LOG_LEVEL", "info"),
+		LogLevel:       getEnvOrDefault("LOG_LEVEL", "info"),
 	}
 	return cfg
 }
@@ -57,4 +57,3 @@ func (c *Config) ShouldWatchAllNamespaces() bool {
 func (c *Config) GetWatchNamespace() string {
 	return strings.TrimSpace(c.WatchNamespace)
 }
-

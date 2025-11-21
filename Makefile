@@ -53,8 +53,8 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: generate fmt vet ## Run tests.
-	go test ./... -coverprofile cover.out
+test: generate fmt vet ## Run tests (excludes integration tests).
+	go test ./... -short -coverprofile cover.out
 
 .PHONY: test-unit
 test-unit: ## Run unit tests only.
@@ -62,7 +62,20 @@ test-unit: ## Run unit tests only.
 
 .PHONY: test-envtest
 test-envtest: ## Run envtest-based integration tests.
-	go test ./test/envtest/... -v -timeout 60s
+	@echo "Installing/updating setup-envtest..."
+	@go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+	@echo "Downloading CAPI CRDs..."
+	@mkdir -p test/crd/capi
+	@curl -L https://github.com/kubernetes-sigs/cluster-api/releases/download/v1.8.0/cluster-api-components.yaml -o test/crd/capi/cluster-api-components.yaml || \
+		(echo "Warning: Failed to download CAPI CRDs. Tests may fail." && rm -f test/crd/capi/cluster-api-components.yaml)
+	@echo "Setting up kubebuilder tools..."
+	@export PATH=$$(go env GOPATH)/bin:$$PATH && \
+	eval $$(setup-envtest use -p env latest) && \
+	go test ./test/envtest/... -v -timeout 120s
+
+.PHONY: clean-envtest
+clean-envtest: ## Clean envtest artifacts.
+	rm -rf test/crd/capi
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint.

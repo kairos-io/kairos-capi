@@ -20,7 +20,9 @@ jobs:
     - name: Cache Go modules
       uses: actions/cache@v4
       with:
-        path: ~/go/pkg/mod
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
         key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
         restore-keys: |
           ${{ runner.os }}-go-
@@ -32,7 +34,7 @@ jobs:
       run: go vet ./...
 
     - name: Run tests
-      run: go test ./... -v -coverprofile=coverage.out
+      run: go test ./... -v -short -coverprofile=coverage.out
 
     - name: Upload coverage
       uses: codecov/codecov-action@v4
@@ -51,6 +53,16 @@ jobs:
       uses: actions/setup-go@v5
       with:
         go-version: '1.22'
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
 
     - name: Install controller-gen
       run: |
@@ -73,6 +85,16 @@ jobs:
       with:
         go-version: '1.22'
 
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
     - name: Install controller-gen
       run: |
         go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.0
@@ -82,7 +104,44 @@ jobs:
 
     - name: Verify manifests
       run: |
-        git diff --exit-code config/crd/bases config/rbac || (echo "Error: Manifests are out of date. Run 'make manifests' and commit the changes." && exit 1)
+        git diff --exit-code config/crd/bases config/rbac config/webhook || (echo "Error: Manifests are out of date. Run 'make manifests' and commit the changes." && exit 1)
+
+  test-envtest:
+    runs-on: ubuntu-latest
+    # Skip envtest tests for now - they require kubebuilder tools
+    # Uncomment when ready to run integration tests in CI
+    if: false
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: Install envtest tools
+      run: |
+        go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+        export PATH=$(go env GOPATH)/bin:$PATH
+        setup-envtest use -p path latest
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run envtest integration tests
+      run: make test-envtest
+      env:
+        KUBEBUILDER_ASSETS: $(setup-envtest use -p path latest)
 
   build:
     runs-on: ubuntu-latest
@@ -94,6 +153,19 @@ jobs:
       uses: actions/setup-go@v5
       with:
         go-version: '1.22'
+
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
 
     - name: Build
       run: make build

@@ -5,6 +5,9 @@
 *.so
 *.dylib
 
+# Test artifacts
+test/crd/capi/
+
 # Test binary, built with `go test -c`
 *.test
 
@@ -35,4 +38,4 @@ dist/
 *.tmp
 *.log
 
-ideas/
+ideas/*

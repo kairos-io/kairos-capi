@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"os"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -36,14 +37,21 @@ import (
 )
 
 func TestBootstrapIntegration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
 	g := NewWithT(t)
 
 	// Setup envtest environment
+	crdPaths := []string{
+		"../../config/crd/bases",
+	}
+	// Add CAPI CRDs if available (downloaded by make test-envtest)
+	if _, err := os.Stat("../../test/crd/capi/cluster-api-components.yaml"); err == nil {
+		crdPaths = append(crdPaths, "../../test/crd/capi")
+	}
 	testEnv := &envtest.Environment{
-		CRDDirectoryPaths: []string{
-			"../../config/crd/bases",
-			// TODO: Add CAPI CRDs path when available
-		},
+		CRDDirectoryPaths:     crdPaths,
 		ErrorIfCRDPathMissing: false, // Allow missing CAPI CRDs for now
 	}
 
@@ -200,4 +208,3 @@ func TestBootstrapIntegration(t *testing.T) {
 	g.Expect(cloudConfig).To(ContainSubstring("enabled: true"))
 	g.Expect(cloudConfig).To(ContainSubstring("--single"))
 }
-
