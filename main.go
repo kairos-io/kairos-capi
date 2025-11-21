@@ -100,6 +100,15 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "KairosControlPlane")
 		os.Exit(1)
 	}
+
+	if err = (&bootstrapv1beta2.KairosConfig{}).SetupWebhookWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "KairosConfig")
+		os.Exit(1)
+	}
+	if err = (&controlplanev1beta2.KairosControlPlane{}).SetupWebhookWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create webhook", "webhook", "KairosControlPlane")
+		os.Exit(1)
+	}
 	//+kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

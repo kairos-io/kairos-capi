@@ -128,11 +128,76 @@ For worker nodes, ensure:
 - Token secret exists and contains the correct key
 - Token is valid for joining the cluster
 
+## Adding Worker Nodes
+
+Once your control plane is ready, you can add worker nodes using a `MachineDeployment`.
+
+### Step 1: Get Worker Token
+
+First, you need to obtain a worker join token from your k0s control plane:
+
+```bash
+# Get kubeconfig for the cluster
+clusterctl get kubeconfig kairos-cluster > kairos-kubeconfig.yaml
+
+# Option 1: If you have access to the control plane node
+# SSH into the control plane and run:
+# k0s token create --role=worker
+
+# Option 2: Use kubectl to exec into k0s controller pod
+kubectl --kubeconfig=kairos-kubeconfig.yaml exec -n kube-system \
+  $(kubectl --kubeconfig=kairos-kubeconfig.yaml get pods -n kube-system -l app=k0s-controller -o jsonpath='{.items[0].metadata.name}') \
+  -- k0s token create --role=worker
+```
+
+### Step 2: Create Worker Token Secret
+
+Create a Secret with the worker token:
+
+```bash
+kubectl create secret generic kairos-worker-token \
+  --from-literal=token="<your-worker-token-here>" \
+  -n default
+```
+
+### Step 3: Apply Worker Sample
+
+Apply the worker sample manifest:
+
+```bash
+kubectl apply -f config/samples/capd/kairos_cluster_k0s_with_workers.yaml
+```
+
+This creates:
+- A `MachineDeployment` for worker nodes
+- A `KairosConfigTemplate` for worker bootstrap configuration
+- A `DockerMachineTemplate` for worker infrastructure
+
+### Step 4: Verify Worker Nodes
+
+```bash
+# Watch machines being created
+kubectl get machines -w
+
+# Once machines are ready, check nodes in the cluster
+kubectl --kubeconfig=kairos-kubeconfig.yaml get nodes
+
+# You should see worker nodes joining
+```
+
+### Worker Configuration Options
+
+The worker `KairosConfigTemplate` supports:
+
+- **Worker Token**: Use `workerTokenSecretRef` (recommended) or inline `workerToken`
+- **SSH Access**: Configure via `githubUser` or `sshPublicKey`
+- **Custom Manifests**: Add Kubernetes manifests via `spec.manifests`
+
 ## Next Steps
 
-- Add worker nodes using `MachineDeployment` with `KairosConfigTemplate` for workers
 - Configure additional manifests via `spec.manifests` in `KairosConfig`
 - Explore multi-node control plane (set `spec.replicas > 1`)
+- Scale worker nodes by updating `MachineDeployment.spec.replicas`
 
 ## Cleanup
 

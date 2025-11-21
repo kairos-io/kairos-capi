@@ -7,6 +7,44 @@ This document describes the design and implementation of the Kairos CAPI Provide
 1. **Bootstrap Provider** - Generates Kairos cloud-config bootstrap data
 2. **Control Plane Provider** - Manages Kairos-based Kubernetes control plane machines
 
+## Admission Webhooks
+
+The provider includes validating and mutating admission webhooks for both `KairosConfig` and `KairosControlPlane` resources.
+
+### Webhook Validation Rules
+
+#### KairosConfig
+
+- **Role validation**: `spec.role` must be either `"control-plane"` or `"worker"`
+- **Distribution validation**: `spec.distribution` must be `"k0s"` (k3s support is planned)
+- **Worker token requirement**: For `role: worker`, either `workerToken` or `workerTokenSecretRef` must be set
+
+#### KairosControlPlane
+
+- **Replicas validation**: `spec.replicas` must be >= 1
+
+### Webhook Defaulting
+
+#### KairosConfig
+
+- `spec.userName` defaults to `"kairos"` if empty
+- `spec.userPassword` defaults to `"kairos"` if empty (development only)
+- `spec.userGroups` defaults to `["admin"]` if empty
+- `spec.distribution` defaults to `"k0s"` if empty
+- `spec.role` defaults to `"worker"` if empty
+
+#### KairosControlPlane
+
+- `spec.replicas` defaults to `1` if not specified
+
+### Future Enhancements
+
+More complex validation may be added in the future, such as:
+- Cross-field validation (e.g., ensuring infrastructure template matches cluster infrastructure)
+- Version compatibility checks
+- Token format validation
+- Network configuration validation
+
 ## Architecture
 
 ### Bootstrap Provider
