@@ -1,0 +1,34 @@
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: KairosControlPlane
+metadata:
+  name: kairos-control-plane
+  namespace: default
+spec:
+  replicas: 1
+  version: "1.30.0"
+  machineTemplate:
+    infrastructureRef:
+      apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+      kind: VSphereMachineTemplate
+      name: control-plane-template
+      namespace: default
+    metadata:
+      labels:
+        cluster.x-k8s.io/control-plane: ""
+  kairosConfigTemplate:
+    name: kairos-config-template-control-plane
+    namespace: default
+
+---
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+kind: KairosConfigTemplate
+metadata:
+  name: kairos-config-template-control-plane
+  namespace: default
+spec:
+  template:
+    spec:
+      role: control-plane
+      distribution: k0s
+      kubernetesVersion: "1.30.0"
+

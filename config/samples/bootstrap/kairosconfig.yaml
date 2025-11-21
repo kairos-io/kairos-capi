@@ -1,0 +1,42 @@
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+kind: KairosConfig
+metadata:
+  name: kairos-config-control-plane
+  namespace: default
+spec:
+  role: control-plane
+  distribution: k0s
+  kubernetesVersion: "1.30.0"
+  preCommands:
+    - echo "Pre-install commands"
+  postCommands:
+    - echo "Post-install commands"
+
+---
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+kind: KairosConfig
+metadata:
+  name: kairos-config-worker
+  namespace: default
+spec:
+  role: worker
+  distribution: k0s
+  kubernetesVersion: "1.30.0"
+  serverAddress: "https://control-plane.example.com:6443"
+  tokenSecretRef:
+    name: k0s-token
+    namespace: default
+
+---
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+kind: KairosConfigTemplate
+metadata:
+  name: kairos-config-template-worker
+  namespace: default
+spec:
+  template:
+    spec:
+      role: worker
+      distribution: k0s
+      kubernetesVersion: "1.30.0"
+

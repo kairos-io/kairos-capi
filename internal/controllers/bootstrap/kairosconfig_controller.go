@@ -1,0 +1,398 @@
+/*
+Copyright 2024 The Kairos CAPI Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+implied. See the License for the specific language governing
+permissions and limitations under the License.
+*/
+
+package bootstrap
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"strings"
+
+	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	"sigs.k8s.io/cluster-api/util"
+	"sigs.k8s.io/cluster-api/util/conditions"
+	"sigs.k8s.io/cluster-api/util/patch"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	bootstrapv1beta2 "github.com/wrkode/kairos-capi/api/bootstrap/v1beta2"
+	"github.com/wrkode/kairos-capi/internal/bootstrap"
+)
+
+// KairosConfigReconciler reconciles a KairosConfig object
+type KairosConfigReconciler struct {
+	client.Client
+	Scheme *runtime.Scheme
+}
+
+//+kubebuilder:rbac:groups=bootstrap.cluster.x-k8s.io,resources=kairosconfigs,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=bootstrap.cluster.x-k8s.io,resources=kairosconfigs/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=bootstrap.cluster.x-k8s.io,resources=kairosconfigs/finalizers,verbs=update
+//+kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machines;clusters,verbs=get;list;watch
+//+kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machines/status;clusters/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups="",resources=secrets;events,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+
+// Reconcile is part of the main kubernetes reconciliation loop
+func (r *KairosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	log := ctrl.LoggerFrom(ctx)
+
+	// Fetch the KairosConfig instance
+	kairosConfig := &bootstrapv1beta2.KairosConfig{}
+	if err := r.Get(ctx, req.NamespacedName, kairosConfig); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	// Handle deletion
+	if !kairosConfig.ObjectMeta.DeletionTimestamp.IsZero() {
+		return r.reconcileDelete(ctx, log, kairosConfig)
+	}
+
+	// Add finalizer if needed
+	if !controllerutil.ContainsFinalizer(kairosConfig, bootstrapv1beta2.KairosConfigFinalizer) {
+		controllerutil.AddFinalizer(kairosConfig, bootstrapv1beta2.KairosConfigFinalizer)
+		if err := r.Update(ctx, kairosConfig); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Check if paused
+	if kairosConfig.Spec.Pause {
+		log.Info("KairosConfig is paused, skipping reconciliation")
+		return ctrl.Result{}, nil
+	}
+
+	// Find the owning Machine
+	machine, err := util.GetOwnerMachine(ctx, r.Client, kairosConfig.ObjectMeta)
+	if err != nil {
+		log.Error(err, "Failed to get owner machine")
+		return ctrl.Result{}, err
+	}
+	if machine == nil {
+		log.Info("Machine Controller has not yet set OwnerRef")
+		return ctrl.Result{}, nil
+	}
+
+	// Find the owning Cluster
+	cluster, err := util.GetClusterFromMetadata(ctx, r.Client, machine.ObjectMeta)
+	if err != nil {
+		log.Error(err, "Failed to get cluster from machine metadata")
+		return ctrl.Result{}, err
+	}
+	if cluster == nil {
+		log.Info("Cluster is not available yet")
+		return ctrl.Result{}, nil
+	}
+
+	// Initialize patch helper
+	helper, err := patch.NewHelper(kairosConfig, r.Client)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Always update observedGeneration
+	kairosConfig.Status.ObservedGeneration = kairosConfig.Generation
+
+	// Reconcile bootstrap data
+	if err := r.reconcileBootstrapData(ctx, log, kairosConfig, machine, cluster); err != nil {
+		// Mark conditions as false on error
+		conditions.MarkFalse(kairosConfig, clusterv1.ReadyCondition, bootstrapv1beta2.BootstrapDataSecretGenerationFailedReason, clusterv1.ConditionSeverityWarning, err.Error())
+		conditions.MarkFalse(kairosConfig, bootstrapv1beta2.BootstrapReadyCondition, bootstrapv1beta2.BootstrapDataSecretGenerationFailedReason, clusterv1.ConditionSeverityWarning, err.Error())
+		conditions.MarkFalse(kairosConfig, bootstrapv1beta2.DataSecretAvailableCondition, bootstrapv1beta2.BootstrapDataSecretGenerationFailedReason, clusterv1.ConditionSeverityWarning, err.Error())
+		
+		kairosConfig.Status.FailureReason = bootstrapv1beta2.BootstrapDataSecretGenerationFailedReason
+		kairosConfig.Status.FailureMessage = err.Error()
+		kairosConfig.Status.Ready = false
+		
+		return ctrl.Result{}, helper.Patch(ctx, kairosConfig)
+	}
+
+	// Mark conditions as true on success
+	conditions.MarkTrue(kairosConfig, clusterv1.ReadyCondition)
+	conditions.MarkTrue(kairosConfig, bootstrapv1beta2.BootstrapReadyCondition)
+	conditions.MarkTrue(kairosConfig, bootstrapv1beta2.DataSecretAvailableCondition)
+	
+	// Clear failure fields
+	kairosConfig.Status.FailureReason = ""
+	kairosConfig.Status.FailureMessage = ""
+
+	// Update status
+	return ctrl.Result{}, helper.Patch(ctx, kairosConfig)
+}
+
+func (r *KairosConfigReconciler) reconcileBootstrapData(ctx context.Context, log logr.Logger, kairosConfig *bootstrapv1beta2.KairosConfig, machine *clusterv1.Machine, cluster *clusterv1.Cluster) error {
+	// If dataSecretName is already set, verify the secret exists
+	if kairosConfig.Status.DataSecretName != nil {
+		secret := &corev1.Secret{}
+		secretKey := types.NamespacedName{
+			Name:      *kairosConfig.Status.DataSecretName,
+			Namespace: kairosConfig.Namespace,
+		}
+		if err := r.Get(ctx, secretKey, secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				// Secret was deleted, regenerate
+				log.Info("Bootstrap secret was deleted, regenerating", "secret", *kairosConfig.Status.DataSecretName)
+				kairosConfig.Status.DataSecretName = nil
+			} else {
+				return fmt.Errorf("failed to get bootstrap secret: %w", err)
+			}
+		} else {
+			// Secret exists, verify it's ready
+			log.Info("Bootstrap data already generated", "secret", *kairosConfig.Status.DataSecretName)
+			kairosConfig.Status.Ready = true
+			return nil
+		}
+	}
+
+	// Generate Kairos cloud-config
+	cloudConfig, err := r.generateCloudConfig(ctx, log, kairosConfig, machine, cluster)
+	if err != nil {
+		return fmt.Errorf("failed to generate cloud-config: %w", err)
+	}
+
+	// Create Secret with bootstrap data
+	randomSuffix, err := randomString(6)
+	if err != nil {
+		return fmt.Errorf("failed to generate random string: %w", err)
+	}
+	secretName := fmt.Sprintf("%s-%s", kairosConfig.Name, randomSuffix)
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: kairosConfig.Namespace,
+			Labels: map[string]string{
+				clusterv1.ClusterNameLabel: cluster.Name,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: kairosConfig.APIVersion,
+					Kind:       kairosConfig.Kind,
+					Name:       kairosConfig.Name,
+					UID:        kairosConfig.UID,
+					Controller: func() *bool { b := true; return &b }(),
+				},
+			},
+		},
+		Type: clusterv1.ClusterSecretType,
+		Data: map[string][]byte{
+			"value": []byte(cloudConfig),
+		},
+	}
+
+	if err := r.Create(ctx, secret); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			// Secret already exists, use it
+			if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: kairosConfig.Namespace}, secret); err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
+	}
+
+	// Update status with dataSecretName
+	kairosConfig.Status.DataSecretName = &secretName
+	kairosConfig.Status.Ready = true
+
+	log.Info("Bootstrap data secret created", "secret", secretName)
+	return nil
+}
+
+func (r *KairosConfigReconciler) generateCloudConfig(ctx context.Context, log logr.Logger, kairosConfig *bootstrapv1beta2.KairosConfig, machine *clusterv1.Machine, cluster *clusterv1.Cluster) (string, error) {
+	// Determine role
+	role := kairosConfig.Spec.Role
+	if role == "" {
+		// Infer from machine labels
+		if util.IsControlPlaneMachine(machine) {
+			role = "control-plane"
+		} else {
+			role = "worker"
+		}
+	}
+
+	// Determine distribution
+	distribution := kairosConfig.Spec.Distribution
+	if distribution == "" {
+		distribution = "k0s"
+	}
+
+	// Get cluster information
+	serverAddress := kairosConfig.Spec.ServerAddress
+	if serverAddress == "" && cluster.Spec.ControlPlaneEndpoint.IsValid() {
+		serverAddress = fmt.Sprintf("https://%s:%d", cluster.Spec.ControlPlaneEndpoint.Host, cluster.Spec.ControlPlaneEndpoint.Port)
+	}
+
+	// Generate cloud-config based on distribution
+	switch distribution {
+	case "k0s":
+		return r.generateK0sCloudConfig(ctx, log, kairosConfig, machine, cluster, role, serverAddress)
+	case "k3s":
+		return "", fmt.Errorf("k3s distribution not yet implemented")
+	default:
+		return "", fmt.Errorf("unsupported distribution: %s", distribution)
+	}
+}
+
+func (r *KairosConfigReconciler) generateK0sCloudConfig(ctx context.Context, log logr.Logger, kairosConfig *bootstrapv1beta2.KairosConfig, machine *clusterv1.Machine, cluster *clusterv1.Cluster, role, serverAddress string) (string, error) {
+	// Determine single-node mode
+	// Single-node is determined by:
+	// 1. Explicit flag in KairosConfig.spec.singleNode
+	// 2. Or if this is a control-plane and we can check the owning KairosControlPlane
+	singleNode := kairosConfig.Spec.SingleNode
+	if !singleNode && role == "control-plane" && machine != nil {
+		// Try to find the owning KairosControlPlane to check replicas
+		ownerRef := metav1.GetControllerOf(machine)
+		if ownerRef != nil && ownerRef.Kind == "KairosControlPlane" {
+			// For now, we rely on the SingleNode flag in spec
+			// In the future, we could fetch the KCP and check spec.replicas == 1
+			log.V(4).Info("Control plane node, single-node mode determined from spec", "singleNode", singleNode)
+		}
+	}
+
+	// Get worker token if needed
+	workerToken := kairosConfig.Spec.WorkerToken
+	if workerToken == "" {
+		workerToken = kairosConfig.Spec.Token
+	}
+	if workerToken == "" && kairosConfig.Spec.TokenSecretRef != nil {
+		secret := &corev1.Secret{}
+		secretKey := types.NamespacedName{
+			Namespace: cluster.Namespace,
+			Name:      kairosConfig.Spec.TokenSecretRef.Name,
+		}
+		if err := r.Get(ctx, secretKey, secret); err != nil {
+			return "", fmt.Errorf("failed to get token secret: %w", err)
+		}
+		// Try common token keys
+		if tokenData, ok := secret.Data["token"]; ok {
+			workerToken = string(tokenData)
+		} else if tokenData, ok := secret.Data["value"]; ok {
+			workerToken = string(tokenData)
+		} else {
+			return "", fmt.Errorf("token secret does not contain 'token' or 'value' key")
+		}
+	}
+
+	// Validate worker token for worker nodes
+	if role == "worker" && workerToken == "" {
+		return "", fmt.Errorf("worker token is required for worker nodes")
+	}
+
+	// Set defaults for user configuration
+	userName := kairosConfig.Spec.UserName
+	if userName == "" {
+		userName = "kairos"
+	}
+	userPassword := kairosConfig.Spec.UserPassword
+	if userPassword == "" {
+		userPassword = "kairos"
+	}
+	userGroups := kairosConfig.Spec.UserGroups
+	if len(userGroups) == 0 {
+		userGroups = []string{"admin"}
+	}
+
+	// Build template data
+	templateData := bootstrap.TemplateData{
+		Role:           role,
+		SingleNode:     singleNode,
+		UserName:       userName,
+		UserPassword:   userPassword,
+		UserGroups:     userGroups,
+		GitHubUser:     kairosConfig.Spec.GitHubUser,
+		SSHPublicKey:   kairosConfig.Spec.SSHPublicKey,
+		WorkerToken:    workerToken,
+		Manifests:      kairosConfig.Spec.Manifests,
+		HostnamePrefix: "metal-",
+	}
+
+	// Render template
+	return bootstrap.RenderK0sCloudConfig(templateData)
+}
+
+func (r *KairosConfigReconciler) reconcileDelete(ctx context.Context, log logr.Logger, kairosConfig *bootstrapv1beta2.KairosConfig) (ctrl.Result, error) {
+	// Remove finalizer
+	controllerutil.RemoveFinalizer(kairosConfig, bootstrapv1beta2.KairosConfigFinalizer)
+	return ctrl.Result{}, r.Update(ctx, kairosConfig)
+}
+
+func splitLines(s string) []string {
+	return strings.Split(s, "\n")
+}
+
+// randomString generates a random string of the given length
+func randomString(length int) (string, error) {
+	b := make([]byte, length)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(b)[:length], nil
+}
+
+// SetupWithManager sets up the controller with the Manager.
+func (r *KairosConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&bootstrapv1beta2.KairosConfig{}).
+		Watches(
+			&clusterv1.Machine{},
+			handler.EnqueueRequestsFromMapFunc(r.machineToKairosConfig),
+		).
+		Complete(r)
+}
+
+// machineToKairosConfig maps a Machine to its KairosConfig
+func (r *KairosConfigReconciler) machineToKairosConfig(ctx context.Context, o client.Object) []reconcile.Request {
+	machine, ok := o.(*clusterv1.Machine)
+	if !ok {
+		return nil
+	}
+
+	// Check if Machine has a bootstrap config reference
+	if machine.Spec.Bootstrap.ConfigRef == nil {
+		return nil
+	}
+
+	// Check if it's a KairosConfig
+	if machine.Spec.Bootstrap.ConfigRef.GroupVersionKind().Group != bootstrapv1beta2.GroupVersion.Group {
+		return nil
+	}
+	if machine.Spec.Bootstrap.ConfigRef.Kind != "KairosConfig" {
+		return nil
+	}
+
+	return []reconcile.Request{
+		{
+			NamespacedName: types.NamespacedName{
+				Name:      machine.Spec.Bootstrap.ConfigRef.Name,
+				Namespace: machine.Namespace,
+			},
+		},
+	}
+}

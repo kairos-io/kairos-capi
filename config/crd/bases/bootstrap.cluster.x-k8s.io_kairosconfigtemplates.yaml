@@ -1,0 +1,293 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.0
+  name: kairosconfigtemplates.bootstrap.cluster.x-k8s.io
+spec:
+  group: bootstrap.cluster.x-k8s.io
+  names:
+    categories:
+    - cluster-api
+    kind: KairosConfigTemplate
+    listKind: KairosConfigTemplateList
+    plural: kairosconfigtemplates
+    singular: kairosconfigtemplate
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1beta2
+    schema:
+      openAPIV3Schema:
+        description: KairosConfigTemplate is the Schema for the kairosconfigtemplates
+          API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: KairosConfigTemplateSpec defines the desired state of KairosConfigTemplate
+            properties:
+              template:
+                description: Template is the KairosConfig template to be used for
+                  each Machine
+                properties:
+                  metadata:
+                    description: Standard object's metadata.
+                    type: object
+                  spec:
+                    description: Spec is the specification of the KairosConfig
+                    properties:
+                      caCertHashes:
+                        description: CACertHashes are the CA certificate hashes for
+                          secure join
+                        items:
+                          type: string
+                        type: array
+                      caCertSecretRef:
+                        description: CACertSecretRef is a reference to a Secret containing
+                          the CA certificate
+                        properties:
+                          apiVersion:
+                            description: API version of the referent.
+                            type: string
+                          fieldPath:
+                            description: |-
+                              If referring to a piece of an object instead of an entire object, this string
+                              should contain a valid JSON/Go field access statement, such as desiredState.manifest.containers[2].
+                              For example, if the object reference is to a container within a pod, this would take on a value like:
+                              "spec.containers{name}" (where "name" refers to the name of the container that triggered
+                              the event) or if no container name is specified "spec.containers[2]" (container with
+                              index 2 in this pod). This syntax is chosen only to have some well-defined way of
+                              referencing a part of an object.
+                            type: string
+                          kind:
+                            description: |-
+                              Kind of the referent.
+                              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+                            type: string
+                          name:
+                            description: |-
+                              Name of the referent.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          namespace:
+                            description: |-
+                              Namespace of the referent.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/
+                            type: string
+                          resourceVersion:
+                            description: |-
+                              Specific resourceVersion to which this reference is made, if any.
+                              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#concurrency-control-and-consistency
+                            type: string
+                          uid:
+                            description: |-
+                              UID of the referent.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      distribution:
+                        default: k0s
+                        description: Distribution specifies the Kubernetes distribution
+                          to install
+                        enum:
+                        - k0s
+                        - k3s
+                        type: string
+                      files:
+                        description: Files specifies additional files to include in
+                          the cloud-config
+                        items:
+                          description: File represents a file to be written in the
+                            cloud-config
+                          properties:
+                            content:
+                              description: Content is the file content
+                              type: string
+                            owner:
+                              description: Owner is the file owner (user:group format,
+                                e.g., "root:root")
+                              type: string
+                            path:
+                              description: Path is the absolute path where the file
+                                should be written
+                              type: string
+                            permissions:
+                              description: Permissions are the file permissions (octal
+                                format, e.g., "0644")
+                              type: string
+                          required:
+                          - content
+                          - path
+                          type: object
+                        type: array
+                      githubUser:
+                        description: |-
+                          GitHubUser is the GitHub username for SSH key access (e.g., "octocat")
+                          If set, SSH keys will be fetched from GitHub
+                        type: string
+                      kubernetesVersion:
+                        description: KubernetesVersion specifies the Kubernetes version
+                          to install
+                        type: string
+                      manifests:
+                        description: |-
+                          Manifests are Kubernetes manifests to be placed in /var/lib/k0s/manifests/
+                          These will be automatically applied by k0s
+                        items:
+                          description: Manifest represents a Kubernetes manifest file
+                          properties:
+                            content:
+                              description: Content is the manifest YAML content
+                              type: string
+                            file:
+                              description: File is the filename
+                              type: string
+                            name:
+                              description: Name is the directory name under /var/lib/k0s/manifests/
+                              type: string
+                          required:
+                          - content
+                          - file
+                          - name
+                          type: object
+                        type: array
+                      pause:
+                        description: Pause indicates that reconciliation should be
+                          paused
+                        type: boolean
+                      postCommands:
+                        description: PostCommands are commands to run after k0s/k3s
+                          installation
+                        items:
+                          type: string
+                        type: array
+                      preCommands:
+                        description: PreCommands are commands to run before k0s/k3s
+                          installation
+                        items:
+                          type: string
+                        type: array
+                      role:
+                        default: worker
+                        description: Role indicates whether this is a control-plane
+                          or worker node
+                        enum:
+                        - control-plane
+                        - worker
+                        type: string
+                      serverAddress:
+                        description: ServerAddress is the address of the Kubernetes
+                          API server (for worker nodes)
+                        type: string
+                      singleNode:
+                        description: |-
+                          SingleNode indicates this is a single-node control plane cluster
+                          When true, k0s will be configured with --single flag
+                        type: boolean
+                      sshPublicKey:
+                        description: SSHPublicKey is a raw SSH public key (alternative
+                          to GitHubUser)
+                        type: string
+                      token:
+                        description: Token is the join token for worker nodes (if
+                          required by distribution)
+                        type: string
+                      tokenSecretRef:
+                        description: TokenSecretRef is a reference to a Secret containing
+                          the join token
+                        properties:
+                          apiVersion:
+                            description: API version of the referent.
+                            type: string
+                          fieldPath:
+                            description: |-
+                              If referring to a piece of an object instead of an entire object, this string
+                              should contain a valid JSON/Go field access statement, such as desiredState.manifest.containers[2].
+                              For example, if the object reference is to a container within a pod, this would take on a value like:
+                              "spec.containers{name}" (where "name" refers to the name of the container that triggered
+                              the event) or if no container name is specified "spec.containers[2]" (container with
+                              index 2 in this pod). This syntax is chosen only to have some well-defined way of
+                              referencing a part of an object.
+                            type: string
+                          kind:
+                            description: |-
+                              Kind of the referent.
+                              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+                            type: string
+                          name:
+                            description: |-
+                              Name of the referent.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                            type: string
+                          namespace:
+                            description: |-
+                              Namespace of the referent.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/
+                            type: string
+                          resourceVersion:
+                            description: |-
+                              Specific resourceVersion to which this reference is made, if any.
+                              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#concurrency-control-and-consistency
+                            type: string
+                          uid:
+                            description: |-
+                              UID of the referent.
+                              More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids
+                            type: string
+                        type: object
+                        x-kubernetes-map-type: atomic
+                      userGroups:
+                        default:
+                        - admin
+                        description: UserGroups are the groups for the default user
+                        items:
+                          type: string
+                        type: array
+                      userName:
+                        default: kairos
+                        description: UserName is the username for the default user
+                        type: string
+                      userPassword:
+                        default: kairos
+                        description: UserPassword is the password for the default
+                          user
+                        type: string
+                      workerToken:
+                        description: |-
+                          WorkerToken is the join token for worker nodes
+                          Alternative to TokenSecretRef for inline token specification
+                        type: string
+                    required:
+                    - kubernetesVersion
+                    type: object
+                required:
+                - spec
+                type: object
+            required:
+            - template
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources: {}
