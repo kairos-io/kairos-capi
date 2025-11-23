@@ -1,0 +1,23 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: kairos-capi-webhook-server-cert
+  namespace: kairos-capi-system
+spec:
+  dnsNames:
+  - webhook-service.kairos-capi-system.svc
+  - webhook-service.kairos-capi-system.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: kairos-capi-selfsigned-issuer
+  secretName: kairos-capi-webhook-server-cert
+
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: kairos-capi-selfsigned-issuer
+  namespace: kairos-capi-system
+spec:
+  selfSigned: {}
+

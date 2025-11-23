@@ -28,6 +28,10 @@ spec:
             drop:
             - ALL
           readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: cert
+          mountPath: /tmp/k8s-webhook-server/serving-certs
+          readOnly: true
         livenessProbe:
           httpGet:
             path: /healthz
@@ -49,4 +53,9 @@ spec:
             memory: 64Mi
       serviceAccountName: kairos-capi-manager
       terminationGracePeriodSeconds: 10
+      volumes:
+      - name: cert
+        secret:
+          defaultMode: 420
+          secretName: kairos-capi-webhook-server-cert
 

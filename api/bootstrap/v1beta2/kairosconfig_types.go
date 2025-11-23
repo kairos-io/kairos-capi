@@ -228,8 +228,6 @@ type KairosConfigStatus struct {
 // +kubebuilder:printcolumn:name="Ready",type="boolean",JSONPath=".status.ready",description="Bootstrap ready"
 // +kubebuilder:printcolumn:name="DataSecretName",type="string",JSONPath=".status.dataSecretName",description="Secret containing bootstrap data"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-// +kubebuilder:webhook:path=/mutate-bootstrap-cluster-x-k8s-io-v1beta2-kairosconfig,mutating=true,failurePolicy=fail,sideEffects=None,groups=bootstrap.cluster.x-k8s.io,resources=kairosconfigs,verbs=create;update,versions=v1beta2,name=mkairosconfig.kb.io,admissionReviewVersions=v1
-// +kubebuilder:webhook:path=/validate-bootstrap-cluster-x-k8s-io-v1beta2-kairosconfig,mutating=false,failurePolicy=fail,sideEffects=None,groups=bootstrap.cluster.x-k8s.io,resources=kairosconfigs,verbs=create;update,versions=v1beta2,name=vkairosconfig.kb.io,admissionReviewVersions=v1
 
 // KairosConfig is the Schema for the kairosconfigs API
 type KairosConfig struct {

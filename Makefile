@@ -39,6 +39,10 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: controller-gen ## Generate ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	@# Fix namespace in webhook manifests (controller-gen generates 'system', we need 'kairos-capi-system')
+	@if [ -f config/webhook/manifests.yaml ]; then \
+		sed -i 's/namespace: system/namespace: kairos-capi-system/g' config/webhook/manifests.yaml; \
+	fi
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.

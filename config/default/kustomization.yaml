@@ -2,8 +2,10 @@
 # It includes CRDs, RBAC, webhooks, and the manager deployment
 
 resources:
+  - ../namespace
   - ../crd
   - ../rbac
+  - ../certmanager
   - ../webhook
   - ../manager
 
