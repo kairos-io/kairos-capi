@@ -43,37 +43,19 @@ manifests: controller-gen ## Generate ClusterRole and CustomResourceDefinition o
 	@if [ -f config/webhook/manifests.yaml ]; then \
 		sed -i 's/namespace: system/namespace: kairos-capi-system/g' config/webhook/manifests.yaml; \
 	fi
-	@# Add contract version labels to bootstrap CRDs (required for Cluster API contract compliance)
-	@if [ -f config/crd/bases/bootstrap.cluster.x-k8s.io_kairosconfigs.yaml ]; then \
-		yq eval '.metadata.labels."cluster.x-k8s.io/provider" = "kairos" | .metadata.labels."cluster.x-k8s.io/v1beta2" = "v1beta2"' -i config/crd/bases/bootstrap.cluster.x-k8s.io_kairosconfigs.yaml 2>/dev/null || \
-		sed -i '/^metadata:/a\  labels:\n    cluster.x-k8s.io/provider: kairos\n    cluster.x-k8s.io/v1beta2: v1beta2' config/crd/bases/bootstrap.cluster.x-k8s.io_kairosconfigs.yaml; \
-	fi
-	@if [ -f config/crd/bases/bootstrap.cluster.x-k8s.io_kairosconfigtemplates.yaml ]; then \
-		yq eval '.metadata.labels."cluster.x-k8s.io/provider" = "kairos" | .metadata.labels."cluster.x-k8s.io/v1beta2" = "v1beta2"' -i config/crd/bases/bootstrap.cluster.x-k8s.io_kairosconfigtemplates.yaml 2>/dev/null || \
-		sed -i '/^metadata:/a\  labels:\n    cluster.x-k8s.io/provider: kairos\n    cluster.x-k8s.io/v1beta2: v1beta2' config/crd/bases/bootstrap.cluster.x-k8s.io_kairosconfigtemplates.yaml; \
-	fi
-	@# Add contract version labels to controlplane CRDs (required for Cluster API contract compliance)
+	@# Add contract version labels to all CRDs (required for Cluster API contract compliance)
 	@# Note: Labels must be added AFTER annotations to match controller-gen output order
-	@# Add contract version labels to controlplane CRDs (required for Cluster API contract compliance)
-	@# Note: Labels must be added AFTER annotations to match controller-gen output order
-	@if [ -f config/crd/bases/controlplane.cluster.x-k8s.io_kairoscontrolplanes.yaml ]; then \
-		if command -v yq >/dev/null 2>&1; then \
-			yq eval '.metadata.labels."cluster.x-k8s.io/provider" = "kairos" | .metadata.labels."cluster.x-k8s.io/v1beta2" = "v1beta2"' -i config/crd/bases/controlplane.cluster.x-k8s.io_kairoscontrolplanes.yaml; \
-		elif python3 -c "import yaml" 2>/dev/null && [ -f hack/add_labels.py ]; then \
-			python3 hack/add_labels.py config/crd/bases/controlplane.cluster.x-k8s.io_kairoscontrolplanes.yaml; \
-		else \
-			sed -i '/^  name: kairoscontrolplanes.controlplane.cluster.x-k8s.io/i\  labels:\n    cluster.x-k8s.io/provider: kairos\n    cluster.x-k8s.io/v1beta2: v1beta2' config/crd/bases/controlplane.cluster.x-k8s.io_kairoscontrolplanes.yaml; \
+	@# Use sed to insert labels without reformatting (preserves controller-gen formatting)
+	@for crd in config/crd/bases/bootstrap.cluster.x-k8s.io_kairosconfigs.yaml \
+		config/crd/bases/bootstrap.cluster.x-k8s.io_kairosconfigtemplates.yaml \
+		config/crd/bases/controlplane.cluster.x-k8s.io_kairoscontrolplanes.yaml \
+		config/crd/bases/controlplane.cluster.x-k8s.io_kairoscontrolplanetemplates.yaml; do \
+		if [ -f "$$crd" ]; then \
+			if ! grep -q "cluster.x-k8s.io/provider: kairos" "$$crd" 2>/dev/null; then \
+				sed -i '/^  name: /i\  labels:\n    cluster.x-k8s.io/provider: kairos\n    cluster.x-k8s.io/v1beta2: v1beta2' "$$crd"; \
+			fi; \
 		fi; \
-	fi
-	@if [ -f config/crd/bases/controlplane.cluster.x-k8s.io_kairoscontrolplanetemplates.yaml ]; then \
-		if command -v yq >/dev/null 2>&1; then \
-			yq eval '.metadata.labels."cluster.x-k8s.io/provider" = "kairos" | .metadata.labels."cluster.x-k8s.io/v1beta2" = "v1beta2"' -i config/crd/bases/controlplane.cluster.x-k8s.io_kairoscontrolplanetemplates.yaml; \
-		elif python3 -c "import yaml" 2>/dev/null && [ -f hack/add_labels.py ]; then \
-			python3 hack/add_labels.py config/crd/bases/controlplane.cluster.x-k8s.io_kairoscontrolplanetemplates.yaml; \
-		else \
-			sed -i '/^  name: kairoscontrolplanetemplates.controlplane.cluster.x-k8s.io/i\  labels:\n    cluster.x-k8s.io/provider: kairos\n    cluster.x-k8s.io/v1beta2: v1beta2' config/crd/bases/controlplane.cluster.x-k8s.io_kairoscontrolplanetemplates.yaml; \
-		fi; \
-	fi
+	done
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.

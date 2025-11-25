@@ -99,9 +99,9 @@ jobs:
       run: |
         go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.17.0
 
-    - name: Install PyYAML (for label insertion)
+    - name: Install ruamel.yaml (for label insertion with formatting preservation)
       run: |
-        python3 -m pip install --user PyYAML
+        python3 -m pip install --user ruamel.yaml
 
     - name: Generate manifests
       run: make manifests

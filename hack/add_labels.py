@@ -10,10 +10,22 @@ These labels are required by Cluster API for provider discovery and contract ver
 compatibility checking. See: https://cluster-api.sigs.k8s.io/developer/providers/contracts/overview.html#api-version-labels
 
 The script is idempotent - running it multiple times produces the same result.
+
+Uses ruamel.yaml to preserve YAML formatting exactly as controller-gen generates it.
 """
 import sys
-import yaml
 from pathlib import Path
+
+try:
+    from ruamel.yaml import YAML
+    RUAMEL_AVAILABLE = True
+except ImportError:
+    try:
+        import yaml
+        RUAMEL_AVAILABLE = False
+    except ImportError:
+        print("Error: Neither ruamel.yaml nor PyYAML is available. Install one with: pip install ruamel.yaml", file=sys.stderr)
+        sys.exit(1)
 
 
 def validate_crd(crd):
@@ -48,9 +60,17 @@ def add_labels_to_crd(filepath):
     
     # Read and parse YAML
     try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            crd = yaml.safe_load(f)
-    except yaml.YAMLError as e:
+        if RUAMEL_AVAILABLE:
+            yaml_parser = YAML()
+            yaml_parser.preserve_quotes = True
+            yaml_parser.width = 4096  # Very wide to prevent wrapping
+            yaml_parser.indent(mapping=2, sequence=4, offset=2)
+            with open(filepath, 'r', encoding='utf-8') as f:
+                crd = yaml_parser.load(f)
+        else:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                crd = yaml.safe_load(f)
+    except Exception as e:
         raise ValueError(f"Invalid YAML in {filepath}: {e}") from e
     
     if crd is None:
@@ -93,17 +113,26 @@ def add_labels_to_crd(filepath):
     crd['metadata'] = ordered_metadata
     
     # Write back preserving formatting
-    # Use a very wide width to minimize line wrapping differences from controller-gen
     try:
-        with open(filepath, 'w', encoding='utf-8') as f:
-            yaml.dump(
-                crd,
-                f,
-                default_flow_style=False,
-                sort_keys=False,
-                allow_unicode=True,
-                width=float('inf')  # Disable line wrapping to match controller-gen output
-            )
+        if RUAMEL_AVAILABLE:
+            yaml_parser = YAML()
+            yaml_parser.preserve_quotes = True
+            yaml_parser.width = 4096  # Very wide to prevent wrapping
+            yaml_parser.indent(mapping=2, sequence=4, offset=2)
+            yaml_parser.default_flow_style = False
+            with open(filepath, 'w', encoding='utf-8') as f:
+                yaml_parser.dump(crd, f)
+        else:
+            # Fallback to PyYAML (may cause formatting differences)
+            with open(filepath, 'w', encoding='utf-8') as f:
+                yaml.dump(
+                    crd,
+                    f,
+                    default_flow_style=False,
+                    sort_keys=False,
+                    allow_unicode=True,
+                    width=float('inf')
+                )
     except IOError as e:
         raise IOError(f"Failed to write CRD file {filepath}: {e}") from e
 
