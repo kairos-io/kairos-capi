@@ -59,7 +59,29 @@ spec:
       folder: "research-vms"
       network:
         devices:
+          # DHCP Configuration (currently active)
+          # Note: VSphere provider v1beta1 does not support setting ipAddrs directly in templates.
+          # For static IPs, you need to use IPAM (IP Address Management) with addressesFromPools.
           - networkName: "VM Network"
+            dhcp4: true              # Enable DHCP for IPv4
+            # When using DHCP, do not specify ipAddrs, gateway4, or nameservers
+            # The VM will receive IP configuration from your DHCP server
+            
+          # Static IP Configuration using IPAM (commented - requires IPAM setup)
+          # To use static IPs, you need to:
+          # 1. Install an IPAM provider (e.g., MetalLB IPAddressPool)
+          # 2. Create an IPAddressPool with your IP range (e.g., 172.16.56.194/24)
+          # 3. Use addressesFromPools instead of ipAddrs:
+          # - networkName: "VM Network"
+          #   addressesFromPools:
+          #     - apiGroup: "ipam.metal3.io"
+          #       kind: "IPAddressPool"
+          #       name: "kairos-ip-pool"
+          #   gateway4: "172.16.56.1"  # Gateway for the subnet
+          #   nameservers:
+          #     - "8.8.8.8"            # DNS servers
+          #     - "8.8.4.4"
+          #   dhcp4: false              # Disable DHCP when using static IPs
       numCPUs: 4
       memoryMiB: 8192
       diskGiB: 80
