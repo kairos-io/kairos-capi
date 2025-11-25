@@ -94,7 +94,7 @@ func (r *KairosControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.R
 			(errMsg != "" && (errMsg == "failed to get Cluster/kairos-cluster: Cluster.cluster.x-k8s.io \"kairos-cluster\" not found" ||
 				errMsg == "Cluster.cluster.x-k8s.io \"kairos-cluster\" not found")) {
 			log.Info("cluster-name label missing or Cluster not found via metadata, searching for Cluster that references this control plane", "error", errMsg)
-			cluster, err = r.findClusterForControlPlane(ctx, kcp)
+			cluster, err = r.findClusterForControlPlane(ctx, log, kcp)
 			if err != nil {
 				log.Error(err, "Failed to find cluster for control plane")
 				return ctrl.Result{}, err
@@ -170,7 +170,7 @@ func (r *KairosControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.R
 }
 
 // findClusterForControlPlane searches for a Cluster that references this KairosControlPlane
-func (r *KairosControlPlaneReconciler) findClusterForControlPlane(ctx context.Context, kcp *controlplanev1beta2.KairosControlPlane) (*clusterv1.Cluster, error) {
+func (r *KairosControlPlaneReconciler) findClusterForControlPlane(ctx context.Context, log logr.Logger, kcp *controlplanev1beta2.KairosControlPlane) (*clusterv1.Cluster, error) {
 	// List all Clusters in the same namespace
 	clusters := &clusterv1.ClusterList{}
 	if err := r.List(ctx, clusters, client.InNamespace(kcp.Namespace)); err != nil {
@@ -194,14 +194,21 @@ func (r *KairosControlPlaneReconciler) findClusterForControlPlane(ctx context.Co
 				expectedVersion := controlplanev1beta2.GroupVersion.String()
 
 				// Match if:
-				// 1. APIVersion matches expected version (v1beta1 style or v1beta2 with full version)
-				// 2. APIVersion is empty (v1beta2 using apiGroup - we trust the kind match)
-				// 3. APIVersion contains the expected group
-				if refAPIVersion == "" ||
-					refAPIVersion == expectedVersion ||
-					(len(refAPIVersion) > 0 && len(expectedGroup) > 0 && refAPIVersion[:len(expectedGroup)] == expectedGroup) {
+				// 1. APIVersion is empty (v1beta2 using apiGroup - we trust the kind match)
+				// 2. APIVersion matches expected version (v1beta1 style or v1beta2 with full version)
+				// 3. APIVersion contains the expected group (handles partial matches)
+				if refAPIVersion == "" {
+					// Empty APIVersion means apiGroup is being used - trust the kind match
+					log.Info("Found Cluster with matching ControlPlaneRef (apiGroup)", "cluster", cluster.Name, "kind", cluster.Spec.ControlPlaneRef.Kind)
 					return cluster, nil
 				}
+				if refAPIVersion == expectedVersion {
+					return cluster, nil
+				}
+				if len(refAPIVersion) > 0 && len(expectedGroup) > 0 && len(refAPIVersion) >= len(expectedGroup) && refAPIVersion[:len(expectedGroup)] == expectedGroup {
+					return cluster, nil
+				}
+				log.Info("Cluster ControlPlaneRef APIVersion doesn't match", "cluster", cluster.Name, "refAPIVersion", refAPIVersion, "expectedVersion", expectedVersion, "expectedGroup", expectedGroup)
 			}
 		}
 	}

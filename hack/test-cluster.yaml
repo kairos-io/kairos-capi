@@ -1,0 +1,85 @@
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: Cluster
+metadata:
+  name: kairos-cluster
+  namespace: default
+spec:
+  infrastructureRef:
+    # Note: In v1beta2, use apiGroup instead of apiVersion
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: VSphereCluster
+    name: kairos-cluster
+  controlPlaneRef:
+    # Note: In v1beta2, use apiGroup instead of apiVersion
+    apiGroup: controlplane.cluster.x-k8s.io
+    kind: KairosControlPlane
+    name: kairos-control-plane
+
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: VSphereCluster
+metadata:
+  name: kairos-cluster
+  namespace: default
+spec:
+  server: "https://172.16.56.10/sdk"
+  identityRef:
+    kind: VSphereClusterIdentity
+    name: vsphere-credentials
+
+---
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: KairosControlPlane
+metadata:
+  name: kairos-control-plane
+  namespace: default
+spec:
+  replicas: 1
+  version: "v1.34.1+k0s.1"
+  machineTemplate:
+    infrastructureRef:
+      apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+      kind: VSphereMachineTemplate
+      name: kairos-control-plane-template
+      namespace: default
+  kairosConfigTemplate:
+    name: kairos-config-template-control-plane
+
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: VSphereMachineTemplate
+metadata:
+  name: kairos-control-plane-template
+  namespace: default
+spec:
+  template:
+    spec:
+      datacenter: "labk8"
+      datastore: "datastore1"
+      folder: "research-vms"
+      network:
+        devices:
+          - networkName: "VM Network"
+      numCPUs: 4
+      memoryMiB: 8192
+      diskGiB: 80
+      template: "kairos-seed"
+      cloneMode: "fullClone"
+
+---
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+kind: KairosConfigTemplate
+metadata:
+  name: kairos-config-template-control-plane
+  namespace: default
+spec:
+  template:
+    spec:
+      role: control-plane
+      distribution: k0s
+      kubernetesVersion: "v1.34.1+k0s.1"
+      userName: kairos
+      userPassword: kairos
+      userGroups:
+        - admin
+

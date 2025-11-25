@@ -52,6 +52,15 @@ manifests: controller-gen ## Generate ClusterRole and CustomResourceDefinition o
 		yq eval '.metadata.labels."cluster.x-k8s.io/provider" = "kairos" | .metadata.labels."cluster.x-k8s.io/v1beta2" = "v1beta2"' -i config/crd/bases/bootstrap.cluster.x-k8s.io_kairosconfigtemplates.yaml 2>/dev/null || \
 		sed -i '/^metadata:/a\  labels:\n    cluster.x-k8s.io/provider: kairos\n    cluster.x-k8s.io/v1beta2: v1beta2' config/crd/bases/bootstrap.cluster.x-k8s.io_kairosconfigtemplates.yaml; \
 	fi
+	@# Add contract version labels to controlplane CRDs (required for Cluster API contract compliance)
+	@if [ -f config/crd/bases/controlplane.cluster.x-k8s.io_kairoscontrolplanes.yaml ]; then \
+		yq eval '.metadata.labels."cluster.x-k8s.io/provider" = "kairos" | .metadata.labels."cluster.x-k8s.io/v1beta2" = "v1beta2"' -i config/crd/bases/controlplane.cluster.x-k8s.io_kairoscontrolplanes.yaml 2>/dev/null || \
+		sed -i '/^metadata:/a\  labels:\n    cluster.x-k8s.io/provider: kairos\n    cluster.x-k8s.io/v1beta2: v1beta2' config/crd/bases/controlplane.cluster.x-k8s.io_kairoscontrolplanes.yaml; \
+	fi
+	@if [ -f config/crd/bases/controlplane.cluster.x-k8s.io_kairoscontrolplanetemplates.yaml ]; then \
+		yq eval '.metadata.labels."cluster.x-k8s.io/provider" = "kairos" | .metadata.labels."cluster.x-k8s.io/v1beta2" = "v1beta2"' -i config/crd/bases/controlplane.cluster.x-k8s.io_kairoscontrolplanetemplates.yaml 2>/dev/null || \
+		sed -i '/^metadata:/a\  labels:\n    cluster.x-k8s.io/provider: kairos\n    cluster.x-k8s.io/v1beta2: v1beta2' config/crd/bases/controlplane.cluster.x-k8s.io_kairoscontrolplanetemplates.yaml; \
+	fi
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
