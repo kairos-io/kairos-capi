@@ -1,0 +1,583 @@
+# =============================================================================
+# KubeVirt Local Testing Environment Makefile
+# =============================================================================
+# This Makefile sets up a complete local testing environment using:
+# - Kind cluster (management cluster)
+# - KubeVirt
+# - Cluster API Provider for KubeVirt (CAPK)
+# - osbuilder (for building Kairos qcow images)
+# - Kairos CAPI Provider
+#
+# Quick Start:
+#   1. Install prerequisites: make install-kind install-clusterctl
+#   2. Run complete setup: make setup
+#   3. Upload image: make upload-kairos-image
+#   4. Create sample cluster: make create-sample-cluster
+#   5. Apply cluster: kubectl apply -f config/samples/capk/kairos_cluster_k0s_single_node.yaml
+#
+# Workflow:
+#   setup -> upload-kairos-image -> create-sample-cluster -> apply cluster manifest
+#
+# For detailed help: make help
+
+# =============================================================================
+# Variables
+# =============================================================================
+
+# Cluster configuration
+KIND_CLUSTER_NAME ?= kairos-capi-test
+KIND_CONFIG ?= hack/kind-config.yaml
+KUBECONFIG ?= $(HOME)/.kube/config
+DOCKER_CONFIG_PATH ?= $(HOME)/.docker/config.json
+
+# Versions
+CAPI_VERSION ?= v1.8.0
+CAPK_VERSION ?= v0.1.10
+KUBEVIRT_VERSION ?= v1.3.0
+KIND_VERSION ?= v0.25.0
+CLUSTERCTL_VERSION ?= v1.8.0
+KUBECTL_VERSION ?= v1.30.0
+CALICO_VERSION ?= v3.29.1
+
+# Kairos/osbuilder configuration
+OSBUILDER_REPO ?= https://github.com/kairos-io/osbuilder.git
+OSBUILDER_DIR ?= $(shell pwd)/.osbuilder
+KAIROS_IMAGE_NAME ?= kairos-kubevirt
+KAIROS_IMAGE_VERSION ?= latest
+KAIROS_IMAGE_FILE ?= $(OSBUILDER_DIR)/build/$(KAIROS_IMAGE_NAME).raw
+
+# Directories
+WORK_DIR ?= $(shell pwd)/.work
+BIN_DIR ?= $(shell pwd)/bin
+
+# Image registry (for kind)
+REGISTRY_NAME ?= registry.local
+REGISTRY_PORT ?= 5000
+REGISTRY ?= $(REGISTRY_NAME):$(REGISTRY_PORT)
+
+# Shell configuration
+SHELL = /usr/bin/env bash -o pipefail
+.SHELLFLAGS = -ec
+
+# =============================================================================
+# Phony Targets
+# =============================================================================
+
+.PHONY: help
+help: ## Display this help message
+	@echo "KubeVirt Local Testing Environment"
+	@echo ""
+	@echo "Usage: make [target]"
+	@echo ""
+	@echo "Main targets:"
+	@awk 'BEGIN {FS = ":.*##"; printf "\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-25s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
+
+##@ Setup
+
+.PHONY: setup
+setup: check-prerequisites create-kind-cluster install-calico install-kubevirt install-capi setup-osbuilder build-kairos-image import-kairos-image install-kairos-provider ## Complete setup: create cluster and install all components
+
+.PHONY: setup-without-build
+setup-without-build: check-prerequisites create-kind-cluster install-calico install-kubevirt install-capi setup-osbuilder install-kairos-provider ## Setup without building image (build separately with build-kairos-image)
+
+.PHONY: check-prerequisites
+check-prerequisites: ## Check if required tools are installed
+	@echo "Checking prerequisites..."
+	@command -v docker >/dev/null 2>&1 || { echo "Error: docker is required but not installed"; exit 1; }
+	@command -v kubectl >/dev/null 2>&1 || { echo "Error: kubectl is required but not installed"; exit 1; }
+	@command -v kind >/dev/null 2>&1 || { echo "Error: kind is required but not installed. Run 'make install-kind'"; exit 1; }
+	@command -v clusterctl >/dev/null 2>&1 || { echo "Error: clusterctl is required but not installed. Run 'make install-clusterctl'"; exit 1; }
+	@echo "All prerequisites met ✓"
+
+.PHONY: install-kind
+install-kind: ## Install kind
+	@echo "Installing kind $(KIND_VERSION)..."
+	@mkdir -p $(BIN_DIR)
+	@curl -Lo $(BIN_DIR)/kind https://kind.sigs.k8s.io/dl/$(KIND_VERSION)/kind-linux-amd64
+	@chmod +x $(BIN_DIR)/kind
+	@sudo mv $(BIN_DIR)/kind /usr/local/bin/kind 2>/dev/null || { \
+		echo "Installed to $(BIN_DIR)/kind (add $(BIN_DIR) to PATH)"; \
+	}
+	@echo "kind installed ✓"
+
+.PHONY: install-clusterctl
+install-clusterctl: ## Install clusterctl
+	@echo "Installing clusterctl $(CLUSTERCTL_VERSION)..."
+	@mkdir -p $(BIN_DIR)
+	@curl -L https://github.com/kubernetes-sigs/cluster-api/releases/download/$(CLUSTERCTL_VERSION)/clusterctl-linux-amd64 -o $(BIN_DIR)/clusterctl
+	@chmod +x $(BIN_DIR)/clusterctl
+	@echo "clusterctl installed to $(BIN_DIR)/clusterctl"
+	@echo "Add $(BIN_DIR) to your PATH or use: export PATH=$$PATH:$(BIN_DIR)"
+
+##@ Kind Cluster
+
+.PHONY: create-kind-cluster
+create-kind-cluster: ## Create a kind cluster for testing (CNI disabled for Calico installation)
+	@echo "Creating kind cluster '$(KIND_CLUSTER_NAME)'..."
+	@if kind get clusters | grep -q "^$(KIND_CLUSTER_NAME)$$"; then \
+		echo "Cluster '$(KIND_CLUSTER_NAME)' already exists. Use 'make delete-kind-cluster' to remove it first."; \
+		exit 1; \
+	fi
+	@mkdir -p $(WORK_DIR)
+	@if [ ! -f "$(DOCKER_CONFIG_PATH)" ]; then \
+		echo "Warning: Docker config file not found at $(DOCKER_CONFIG_PATH)"; \
+		echo "Creating empty Docker config to avoid rate limits..."; \
+		mkdir -p $$(dirname $(DOCKER_CONFIG_PATH)); \
+		echo '{}' > $(DOCKER_CONFIG_PATH); \
+	fi
+	@printf 'kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nname: %s\nnetworking:\n  disableDefaultCNI: true\nnodes:\n- role: control-plane\n  extraMounts:\n  - containerPath: /var/lib/kubelet/config.json\n    hostPath: %s\n' $(KIND_CLUSTER_NAME) $(DOCKER_CONFIG_PATH) > $(WORK_DIR)/kind-config.yaml
+	@echo "Kind config created with Docker config mount: $(DOCKER_CONFIG_PATH)"
+	@kind create cluster --name $(KIND_CLUSTER_NAME) --config $(WORK_DIR)/kind-config.yaml
+	@kubectl cluster-info --context kind-$(KIND_CLUSTER_NAME)
+	@echo "Kind cluster created ✓"
+	@echo "Note: Default CNI is disabled. Install Calico with: make install-calico"
+
+.PHONY: delete-kind-cluster
+delete-kind-cluster: ## Delete the kind cluster
+	@echo "Deleting kind cluster '$(KIND_CLUSTER_NAME)'..."
+	@kind delete cluster --name $(KIND_CLUSTER_NAME) || true
+	@echo "Kind cluster deleted ✓"
+
+.PHONY: kind-kubeconfig
+kind-kubeconfig: ## Get kubeconfig for the kind cluster
+	@kind get kubeconfig --name $(KIND_CLUSTER_NAME)
+
+.PHONY: install-calico
+install-calico: ## Install Calico CNI (required for LoadBalancer support in KubeVirt)
+	@echo "Installing Calico CNI $(CALICO_VERSION)..."
+	@kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/$(CALICO_VERSION)/manifests/calico.yaml || \
+		kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/$(CALICO_VERSION)/manifests/calico.yaml
+	@echo "Waiting for Calico to be ready..."
+	@kubectl wait --for=condition=Available --timeout=300s -n kube-system deployment/calico-kube-controllers || true
+	@echo "Waiting for Calico node daemonset pods to be ready..."
+	@bash -c '\
+		timeout=300; \
+		while [ $$timeout -gt 0 ]; do \
+			ready=$$(kubectl get daemonset calico-node -n kube-system -o jsonpath="{.status.numberReady}" 2>/dev/null || echo "0"); \
+			desired=$$(kubectl get daemonset calico-node -n kube-system -o jsonpath="{.status.desiredNumberScheduled}" 2>/dev/null || echo "0"); \
+			if [ "$$ready" = "$$desired" ] && [ "$$desired" != "0" ]; then \
+				echo "✓ Calico node daemonset is ready ($$ready/$$desired pods)"; \
+				break; \
+			fi; \
+			echo -n "."; \
+			sleep 2; \
+			timeout=$$((timeout - 2)); \
+		done; \
+		echo ""; \
+		if [ $$timeout -le 0 ]; then \
+			echo "Warning: Calico node daemonset may not be fully ready, but continuing..."; \
+			kubectl get daemonset calico-node -n kube-system || true; \
+		fi'
+	@echo "Calico CNI installed ✓"
+
+##@ KubeVirt
+
+.PHONY: install-kubevirt
+install-kubevirt: install-cdi ## Install KubeVirt on the kind cluster
+	@echo "Installing KubeVirt $(KUBEVIRT_VERSION)..."
+	@kubectl apply -f https://github.com/kubevirt/kubevirt/releases/download/$(KUBEVIRT_VERSION)/kubevirt-operator.yaml
+	@kubectl apply -f https://github.com/kubevirt/kubevirt/releases/download/$(KUBEVIRT_VERSION)/kubevirt-cr.yaml
+	@echo "Waiting for KubeVirt to be ready..."
+	@kubectl wait --for=condition=Available --timeout=300s -n kubevirt deployment/virt-operator || true
+	@echo "Waiting for KubeVirt CR to be ready..."
+	@bash -c '\
+		echo "Checking KubeVirt status..."; \
+		if kubectl wait --for=condition=Available --timeout=10s -n kubevirt kubevirt/kubevirt 2>/dev/null; then \
+			echo "✓ KubeVirt is ready (Available condition met)"; \
+		else \
+			echo "Waiting for KubeVirt phase to be Deployed..."; \
+			timeout=300; \
+			while [ $$timeout -gt 0 ]; do \
+				phase=$$(kubectl get kubevirt kubevirt -n kubevirt -o jsonpath="{.status.phase}" 2>/dev/null || echo ""); \
+				if [ "$$phase" = "Deployed" ]; then \
+					echo "✓ KubeVirt is ready (phase: $$phase)"; \
+					break; \
+				fi; \
+				echo -n "."; \
+				sleep 2; \
+				timeout=$$((timeout - 2)); \
+			done; \
+			echo ""; \
+			if [ $$timeout -le 0 ]; then \
+				echo "Warning: KubeVirt may not be fully ready, but continuing..."; \
+				kubectl get kubevirt kubevirt -n kubevirt || true; \
+			fi \
+		fi'
+	@echo "KubeVirt installed ✓"
+
+.PHONY: install-cdi
+install-cdi: ## Install Containerized Data Importer (CDI) for image uploads
+	@echo "Installing CDI (Containerized Data Importer)..."
+	@kubectl apply -f https://github.com/kubevirt/containerized-data-importer/releases/latest/download/cdi-operator.yaml
+	@kubectl apply -f https://github.com/kubevirt/containerized-data-importer/releases/latest/download/cdi-cr.yaml
+	@echo "Waiting for CDI to be ready..."
+	@kubectl wait --for=condition=Available --timeout=300s -n cdi deployment/cdi-operator || true
+	@echo "Waiting for CDI CR to be ready..."
+	@bash -c '\
+		echo "Checking CDI status..."; \
+		if kubectl wait --for=condition=Available --timeout=10s -n cdi cdi/cdi 2>/dev/null; then \
+			echo "✓ CDI is ready (Available condition met)"; \
+		else \
+			echo "Waiting for CDI phase to be Deployed..."; \
+			timeout=300; \
+			while [ $$timeout -gt 0 ]; do \
+				phase=$$(kubectl get cdi cdi -n cdi -o jsonpath="{.status.phase}" 2>/dev/null || echo ""); \
+				if [ "$$phase" = "Deployed" ]; then \
+					echo "✓ CDI is ready (phase: $$phase)"; \
+					break; \
+				fi; \
+				echo -n "."; \
+				sleep 2; \
+				timeout=$$((timeout - 2)); \
+			done; \
+			echo ""; \
+			if [ $$timeout -le 0 ]; then \
+				echo "Warning: CDI may not be fully ready, but continuing..."; \
+				kubectl get cdi cdi -n cdi || true; \
+			fi \
+		fi'
+	@echo "CDI installed ✓"
+
+.PHONY: uninstall-kubevirt
+uninstall-kubevirt: ## Uninstall KubeVirt from the kind cluster
+	@echo "Uninstalling KubeVirt..."
+	@kubectl delete -f https://github.com/kubevirt/kubevirt/releases/download/$(KUBEVIRT_VERSION)/kubevirt-cr.yaml || true
+	@kubectl delete -f https://github.com/kubevirt/kubevirt/releases/download/$(KUBEVIRT_VERSION)/kubevirt-operator.yaml || true
+	@echo "KubeVirt uninstalled ✓"
+
+##@ Cluster API
+
+.PHONY: install-capi
+install-capi: ## Install Cluster API (CAPI) and CAPK on the kind cluster
+	@echo "Installing Cluster API $(CAPI_VERSION) with KubeVirt provider (CAPK $(CAPK_VERSION))..."
+	@export PATH=$$PATH:$(BIN_DIR) && \
+	echo "Using CAPK version: $(CAPK_VERSION)" && \
+	clusterctl init --infrastructure kubevirt:$(CAPK_VERSION) || \
+	{ echo "Error: Failed to initialize CAPI with CAPK $(CAPK_VERSION). Make sure clusterctl is in PATH."; exit 1; }
+	@echo "Waiting for CAPI components to be ready..."
+	@bash -c '\
+		echo "Waiting for CAPI core controller..."; \
+		kubectl wait --for=condition=Available --timeout=300s -n capi-system deployment/capi-controller-manager 2>/dev/null || echo "  (CAPI core may still be starting)"; \
+		echo "Waiting for CAPK bootstrap controller..."; \
+		kubectl wait --for=condition=Available --timeout=300s -n capi-kubevirt-bootstrap-system deployment/capi-kubevirt-bootstrap-controller-manager 2>/dev/null || echo "  (CAPK bootstrap may still be starting)"; \
+		echo "Waiting for CAPK control plane controller..."; \
+		kubectl wait --for=condition=Available --timeout=300s -n capi-kubevirt-control-plane-system deployment/capi-kubevirt-control-plane-controller-manager 2>/dev/null || echo "  (CAPK control plane may still be starting)"; \
+		echo "Waiting for CAPK infrastructure controller..."; \
+		kubectl wait --for=condition=Available --timeout=300s -n capk-system deployment/capk-controller-manager 2>/dev/null || echo "  (CAPK infrastructure may still be starting)"; \
+		echo "Note: Some controllers may still be initializing. Check with: kubectl get pods -A | grep cap"'
+	@echo "Cluster API and CAPK installed ✓"
+
+.PHONY: uninstall-capi
+uninstall-capi: ## Uninstall Cluster API from the kind cluster
+	@echo "Uninstalling Cluster API..."
+	@export PATH=$$PATH:$(BIN_DIR) && \
+	clusterctl delete --all || true
+	@echo "Cluster API uninstalled ✓"
+
+##@ CAPK (Cluster API Provider for KubeVirt)
+
+.PHONY: install-capk
+install-capk: install-capi ## Alias for install-capi (CAPK is installed with CAPI)
+	@echo "CAPK is installed as part of CAPI initialization"
+
+##@ osbuilder
+
+.PHONY: install-helm
+install-helm: ## Install Helm if not already installed
+	@if command -v helm >/dev/null 2>&1; then \
+		echo "Helm is already installed: $$(helm version --short)"; \
+	else \
+		echo "Installing Helm..."; \
+		curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash || \
+		{ echo "Error: Failed to install Helm. Please install it manually."; exit 1; }; \
+	fi
+
+.PHONY: install-osbuilder-crds
+install-osbuilder-crds: install-helm ## Install osbuilder CRDs (OSArtifact) via Helm chart
+	@echo "Installing osbuilder CRDs from Helm chart..."
+	@helm repo add kairos https://kairos-io.github.io/helm-charts 2>/dev/null || helm repo add kairos https://kairos-io.github.io/helm-charts --force-update
+	@helm repo update kairos
+	@helm install kairos-crds kairos/kairos-crds --namespace default --create-namespace --wait --timeout=60s || \
+	{ echo "Error: Failed to install osbuilder CRDs via Helm chart."; exit 1; }
+	@echo "Waiting for OSArtifact CRD to be ready..."
+	@kubectl wait --for=condition=Established --timeout=60s crd/osartifacts.build.kairos.io || \
+	{ echo "Error: OSArtifact CRD not established."; exit 1; }
+	@echo "osbuilder CRDs installed ✓"
+
+.PHONY: setup-osbuilder
+setup-osbuilder: install-osbuilder-crds ## Install osbuilder using Helm charts
+	@echo "Installing osbuilder using Helm charts..."
+	@helm repo add kairos https://kairos-io.github.io/helm-charts 2>/dev/null || helm repo add kairos https://kairos-io.github.io/helm-charts --force-update
+	@helm repo update kairos
+	@if helm list -n default | grep -q osbuilder 2>/dev/null; then \
+		echo "osbuilder is already installed. Upgrading..."; \
+		helm upgrade osbuilder kairos/osbuilder -n default --create-namespace || \
+		{ echo "Warning: Failed to upgrade osbuilder. It may already be at the latest version."; }; \
+	else \
+		echo "Installing osbuilder..."; \
+		helm install osbuilder kairos/osbuilder -n default --create-namespace || \
+		{ echo "Error: Failed to install osbuilder."; exit 1; }; \
+	fi
+	@echo "Waiting for osbuilder to be ready..."
+	@kubectl wait --for=condition=Available --timeout=300s -n default deployment/osbuilder 2>/dev/null || \
+	{ echo "Warning: osbuilder deployment may still be starting. Check with: kubectl get pods -n default -l app.kubernetes.io/name=osbuilder"; }
+	@echo "osbuilder installed ✓"
+
+.PHONY: build-kairos-image
+build-kairos-image: setup-osbuilder ## Build Kairos cloud image using OSArtifact CR (via Helm-installed osbuilder)
+	@echo "Building Kairos cloud image using OSArtifact CR..."
+	@echo "Note: osbuilder controller will create a Job to build the image."
+	@echo "The built image will be served via nginx service."
+	@mkdir -p $(WORK_DIR)
+	@mkdir -p $(OSBUILDER_DIR)/build
+	@echo "Creating OSArtifact CustomResource..."
+	@printf 'apiVersion: build.kairos.io/v1alpha2\nkind: OSArtifact\nmetadata:\n  name: %s\n  namespace: default\nspec:\n  imageName: "quay.io/kairos/fedora:40-core-amd64-generic-v3.6.1-beta2"\n  cloudImage: true\n  diskSize: "32000"\n  exporters:\n  - template:\n      spec:\n        restartPolicy: Never\n        containers:\n        - name: upload\n          image: quay.io/curl/curl\n          command:\n          - /bin/sh\n          args:\n          - -c\n          - |\n              for f in $$(ls /artifacts)\n              do\n              curl -T /artifacts/$$f http://osartifactbuilder-operator-osbuilder-nginx/upload/$$f\n              done\n          volumeMounts:\n          - name: artifacts\n            mountPath: /artifacts\n' $(KAIROS_IMAGE_NAME) > $(WORK_DIR)/osartifact.yaml
+	@kubectl apply -f $(WORK_DIR)/osartifact.yaml
+	@echo "Waiting for OSArtifact to be ready..."
+	@bash -c '\
+		timeout=1800; \
+		while [ $$timeout -gt 0 ]; do \
+			phase=$$(kubectl get osartifact $(KAIROS_IMAGE_NAME) -n default -o jsonpath="{.status.phase}" 2>/dev/null || echo "Pending"); \
+			if [ "$$phase" = "Ready" ]; then \
+				echo "✓ OSArtifact is ready (phase: $$phase)"; \
+				break; \
+			elif [ "$$phase" = "Error" ]; then \
+				echo "✗ OSArtifact build failed. Check logs:"; \
+				kubectl get osartifact $(KAIROS_IMAGE_NAME) -n default -o yaml; \
+				exit 1; \
+			fi; \
+			echo -n "."; \
+			sleep 5; \
+			timeout=$$((timeout - 5)); \
+		done; \
+		echo ""; \
+		if [ $$timeout -le 0 ]; then \
+			echo "Warning: OSArtifact build timed out. Check status:"; \
+			kubectl get osartifact $(KAIROS_IMAGE_NAME) -n default; \
+			exit 1; \
+		fi'
+	@echo "Downloading built image from nginx..."
+	@bash -c '\
+		ARTIFACT_NAME="$(KAIROS_IMAGE_NAME)"; \
+		IMAGE_FILENAME="$$ARTIFACT_NAME.raw"; \
+		NGINX_SVC=$$(kubectl get svc -n default -o jsonpath="{.items[?(@.spec.type==\"NodePort\")].metadata.name}" | tr " " "\n" | grep -i nginx | head -1); \
+		if [ -z "$$NGINX_SVC" ]; then \
+			echo "Error: Could not find nginx service."; \
+			kubectl get svc -n default || true; \
+			exit 1; \
+		fi; \
+		NODE_PORT=$$(kubectl get svc $$NGINX_SVC -n default -o jsonpath="{.spec.ports[0].nodePort}"); \
+		NODE_IP=$$(kubectl get nodes -o jsonpath="{.items[0].status.addresses[?(@.type==\"InternalIP\")].address}"); \
+		if [ -z "$$NODE_PORT" ] || [ -z "$$NODE_IP" ]; then \
+			echo "Error: Could not determine nginx endpoint."; \
+			exit 1; \
+		fi; \
+		NGINX_URL="http://$$NODE_IP:$$NODE_PORT"; \
+		OUTPUT_FILE="$(OSBUILDER_DIR)/build/$$IMAGE_FILENAME"; \
+		echo "Downloading $$IMAGE_FILENAME from $$NGINX_URL/$$IMAGE_FILENAME"; \
+		curl -f -o "$$OUTPUT_FILE" "$$NGINX_URL/$$IMAGE_FILENAME" || \
+		{ echo "Error: Failed to download image from $$NGINX_URL/$$IMAGE_FILENAME"; exit 1; }; \
+		echo "Downloaded to: $$OUTPUT_FILE"'
+	@echo "Checking for built image..."
+	@find $(OSBUILDER_DIR)/build -name "$(KAIROS_IMAGE_NAME)*" -type f 2>/dev/null | head -5 || echo "No image files found."
+	@echo "Kairos image build complete ✓"
+
+##@ Image Import
+
+.PHONY: import-kairos-image
+import-kairos-image: ## Import Kairos image to KubeVirt as a DataVolume
+	@echo "Importing Kairos image to KubeVirt..."
+	@bash -c '\
+		IMAGE_FILE=""; \
+		if [ -f "$(KAIROS_IMAGE_FILE)" ]; then \
+			IMAGE_FILE="$(KAIROS_IMAGE_FILE)"; \
+		elif [ -d "$(OSBUILDER_DIR)/build" ]; then \
+			IMAGE_FILE=$$(find $(OSBUILDER_DIR)/build -name "$(KAIROS_IMAGE_NAME)*" -type f \( -name "*.raw" -o -name "*.qcow2" \) | head -1); \
+			if [ -z "$$IMAGE_FILE" ]; then \
+				echo "Warning: No image files found in $(OSBUILDER_DIR)/build/"; \
+				echo "Available files:"; \
+				ls -la $(OSBUILDER_DIR)/build/ 2>/dev/null || echo "Build directory is empty."; \
+				echo "Please run '\''make build-kairos-image'\'' first or specify KAIROS_IMAGE_FILE manually."; \
+				exit 1; \
+			fi; \
+			echo "Found image: $$IMAGE_FILE"; \
+		else \
+			echo "Error: Image file not found and build directory doesn'\''t exist."; \
+			echo "Please run '\''make build-kairos-image'\'' first to build the image."; \
+			exit 1; \
+		fi; \
+		echo "Using image file: $$IMAGE_FILE"; \
+		echo "Creating PVC for Kairos image..."; \
+		printf '\''apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: %s\n  namespace: default\nspec:\n  accessModes:\n    - ReadWriteOnce\n  resources:\n    requests:\n      storage: 20Gi\n'\'' $(KAIROS_IMAGE_NAME) > $(WORK_DIR)/kairos-pvc.yaml; \
+		kubectl apply -f $(WORK_DIR)/kairos-pvc.yaml; \
+		echo "PVC created. Use '\''make upload-kairos-image'\'' to upload the image, or:"; \
+		echo "  virtctl image-upload --image-path=$$IMAGE_FILE --pvc-name=$(KAIROS_IMAGE_NAME) --pvc-size=20Gi"'
+	@echo "Kairos image import setup complete ✓"
+
+.PHONY: install-virtctl
+install-virtctl: ## Install virtctl CLI tool
+	@echo "Installing virtctl..."
+	@mkdir -p $(BIN_DIR)
+	@VERSION=$$(kubectl get kubevirt kubevirt -n kubevirt -o jsonpath='{.status.observedKubeVirtVersion}' 2>/dev/null || echo "$(KUBEVIRT_VERSION)") && \
+	curl -L https://github.com/kubevirt/kubevirt/releases/download/$$VERSION/virtctl-$$VERSION-linux-amd64 -o $(BIN_DIR)/virtctl && \
+	chmod +x $(BIN_DIR)/virtctl && \
+	echo "virtctl installed to $(BIN_DIR)/virtctl"
+
+.PHONY: upload-kairos-image
+upload-kairos-image: install-virtctl ## Upload Kairos image using virtctl
+	@echo "Uploading Kairos image using virtctl..."
+	@IMAGE_FILE=""; \
+	if [ -f "$(KAIROS_IMAGE_FILE)" ]; then \
+		IMAGE_FILE="$(KAIROS_IMAGE_FILE)"; \
+	elif [ -d "$(OSBUILDER_DIR)/build" ]; then \
+		IMAGE_FILE=$$(find $(OSBUILDER_DIR)/build -name "$(KAIROS_IMAGE_NAME)*" -type f \( -name "*.raw" -o -name "*.qcow2" \) | head -1); \
+	fi; \
+	if [ -z "$$IMAGE_FILE" ] || [ ! -f "$$IMAGE_FILE" ]; then \
+		echo "Error: Image file not found."; \
+		if [ -d "$(OSBUILDER_DIR)/build" ]; then \
+			echo "Available files in $(OSBUILDER_DIR)/build/:"; \
+			ls -la $(OSBUILDER_DIR)/build/ 2>/dev/null || echo "Build directory is empty."; \
+		else \
+			echo "Build directory not found. Run 'make build-kairos-image' first."; \
+		fi; \
+		exit 1; \
+	fi; \
+	echo "Using image file: $$IMAGE_FILE"; \
+	export PATH=$$PATH:$(BIN_DIR) && \
+	UPLOADPROXY_IP=$$(kubectl get service cdi-uploadproxy -n cdi -o jsonpath='{.spec.clusterIP}' 2>/dev/null) && \
+	if [ -z "$$UPLOADPROXY_IP" ]; then \
+		echo "Error: CDI upload proxy not found. Make sure CDI is installed."; \
+		exit 1; \
+	fi && \
+	virtctl image-upload \
+		--image-path=$$IMAGE_FILE \
+		--pvc-name=$(KAIROS_IMAGE_NAME) \
+		--pvc-size=20Gi \
+		--uploadproxy-url=$$UPLOADPROXY_IP:443 \
+		--insecure || \
+	{ echo "Error: Failed to upload image."; exit 1; }
+	@echo "Kairos image uploaded ✓"
+
+##@ Kairos CAPI Provider
+
+.PHONY: install-cert-manager
+install-cert-manager: ## Install cert-manager for webhook certificates
+	@echo "Installing cert-manager..."
+	@kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.2/cert-manager.yaml || \
+	{ echo "Warning: Failed to install cert-manager. It may already be installed."; }
+	@echo "Waiting for cert-manager to be ready..."
+	@kubectl wait --for=condition=Available --timeout=300s -n cert-manager deployment/cert-manager || true
+	@kubectl wait --for=condition=Available --timeout=300s -n cert-manager deployment/cert-manager-webhook || true
+	@kubectl wait --for=condition=Available --timeout=300s -n cert-manager deployment/cert-manager-cainjector || true
+	@echo "cert-manager installed ✓"
+
+.PHONY: install-kairos-provider
+install-kairos-provider: install-cert-manager ## Install Kairos CAPI Provider on the kind cluster
+	@echo "Installing Kairos CAPI Provider..."
+	@kubectl apply -k config/namespace
+	@kubectl apply -k config/crd
+	@kubectl apply -k config/rbac
+	@kubectl apply -k config/certmanager
+	@echo "Waiting for webhook certificate to be created..."
+	@bash -c '\
+		timeout=60; \
+		while [ $$timeout -gt 0 ]; do \
+			if kubectl get secret kairos-capi-webhook-server-cert -n kairos-capi-system >/dev/null 2>&1; then \
+				echo "✓ Webhook certificate secret created"; \
+				break; \
+			fi; \
+			echo -n "."; \
+			sleep 2; \
+			timeout=$$((timeout - 2)); \
+		done; \
+		if [ $$timeout -le 0 ]; then \
+			echo "Warning: Webhook certificate secret not created. Check cert-manager logs."; \
+		fi'
+	@kubectl apply -k config/webhook
+	@kubectl apply -k config/manager
+	@echo "Waiting for Kairos CAPI Provider to be ready..."
+	@kubectl wait --for=condition=Available --timeout=300s -n kairos-capi-system deployment/kairos-capi-controller-manager || true
+	@echo "Kairos CAPI Provider installed ✓"
+
+.PHONY: uninstall-kairos-provider
+uninstall-kairos-provider: ## Uninstall Kairos CAPI Provider from the kind cluster
+	@echo "Uninstalling Kairos CAPI Provider..."
+	@kubectl delete -k config/manager || true
+	@kubectl delete -k config/webhook || true
+	@kubectl delete -k config/certmanager || true
+	@kubectl delete -k config/rbac || true
+	@kubectl delete -k config/crd || true
+	@kubectl delete -k config/namespace || true
+	@echo "Kairos CAPI Provider uninstalled ✓"
+
+##@ Cleanup
+
+.PHONY: clean
+clean: ## Clean up work directories and temporary files
+	@echo "Cleaning up work directories..."
+	@rm -rf $(WORK_DIR)
+	@echo "Cleanup complete ✓"
+
+.PHONY: clean-all
+clean-all: delete-kind-cluster clean ## Clean up everything including the kind cluster
+	@echo "Full cleanup complete ✓"
+
+##@ Status
+
+.PHONY: status
+status: ## Show status of all components
+	@echo "=== Kind Cluster Status ==="
+	@kind get clusters | grep -q "^$(KIND_CLUSTER_NAME)$$" && echo "✓ Kind cluster '$(KIND_CLUSTER_NAME)' exists" || echo "✗ Kind cluster '$(KIND_CLUSTER_NAME)' not found"
+	@echo ""
+	@echo "=== Calico CNI Status ==="
+	@kubectl get deployments -n kube-system calico-kube-controllers 2>/dev/null | grep -q calico && echo "✓ Calico installed" || echo "✗ Calico not installed"
+	@echo ""
+	@echo "=== KubeVirt Status ==="
+	@kubectl get kubevirt -n kubevirt 2>/dev/null && echo "✓ KubeVirt installed" || echo "✗ KubeVirt not installed"
+	@echo ""
+	@echo "=== Cluster API Status ==="
+	@kubectl get deployments -n capi-system 2>/dev/null | grep -q capi && echo "✓ CAPI installed" || echo "✗ CAPI not installed"
+	@echo ""
+	@echo "=== CAPK Status ==="
+	@kubectl get deployments -n capk-system 2>/dev/null | grep -q capk && echo "✓ CAPK installed" || echo "✗ CAPK not installed"
+	@echo ""
+	@echo "=== CDI Status ==="
+	@kubectl get deployments -n cdi 2>/dev/null | grep -q cdi && echo "✓ CDI installed" || echo "✗ CDI not installed"
+	@echo ""
+	@echo "=== Kairos CAPI Provider Status ==="
+	@kubectl get deployments -n kairos-capi-system 2>/dev/null | grep -q kairos-capi && echo "✓ Kairos CAPI Provider installed" || echo "✗ Kairos CAPI Provider not installed"
+	@echo ""
+	@echo "=== Kairos Image Status ==="
+	@if [ -f "$(KAIROS_IMAGE_FILE)" ]; then \
+		echo "✓ Kairos image found: $(KAIROS_IMAGE_FILE)"; \
+		ls -lh $(KAIROS_IMAGE_FILE); \
+	else \
+		echo "✗ Kairos image not found: $(KAIROS_IMAGE_FILE)"; \
+		if [ -d "$(OSBUILDER_DIR)/build" ]; then \
+			echo "Available files:"; \
+			ls -lh $(OSBUILDER_DIR)/build/ 2>/dev/null || echo "Build directory is empty."; \
+		fi; \
+	fi
+	@echo ""
+	@echo "=== OSArtifact Status ==="
+	@kubectl get osartifact $(KAIROS_IMAGE_NAME) -n default 2>/dev/null && echo "✓ OSArtifact exists" || echo "✗ OSArtifact not found"
+	@echo ""
+	@echo "=== PVC Status ==="
+	@kubectl get pvc $(KAIROS_IMAGE_NAME) -n default 2>/dev/null && echo "✓ PVC exists" || echo "✗ PVC not found"
+
+##@ Development
+
+.PHONY: dev-deploy
+dev-deploy: ## Deploy local development build of Kairos CAPI Provider
+	@echo "Building and deploying local development build..."
+	@$(MAKE) -f Makefile docker-build IMG=$(REGISTRY)/kairos-capi:dev
+	@kind load docker-image $(REGISTRY)/kairos-capi:dev --name $(KIND_CLUSTER_NAME)
+	@cd config/manager && kustomize edit set image controller=$(REGISTRY)/kairos-capi:dev
+	@kustomize build config/default | kubectl apply -f -
+	@echo "Development build deployed ✓"
+
+.PHONY: create-sample-cluster
+create-sample-cluster: ## Create a sample cluster manifest for KubeVirt
+	@echo "Creating sample cluster manifest..."
+	@mkdir -p config/samples/capk
+	@bash hack/create-sample-cluster.sh
