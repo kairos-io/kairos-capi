@@ -57,6 +57,48 @@ k0s:
     - --single
   {{- end }}
 
+# Create bootstrap success marker after k0s is ready
+# This file is checked by CAPK to determine if bootstrap has completed
+write_files:
+  - path: /usr/local/bin/kairos-bootstrap-success.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # Wait for k0s to be ready, then create bootstrap success marker
+      set -e
+      
+      # Wait for k0s service to be active
+      timeout=300
+      elapsed=0
+      while [ $elapsed -lt $timeout ]; do
+        # Check if k0s controller service is active
+        if systemctl is-active --quiet k0scontroller 2>/dev/null || systemctl is-active --quiet k0s 2>/dev/null; then
+          # Wait a bit more to ensure k0s is fully initialized
+          sleep 15
+          # Try to check if k0s API is responding (using k0s kubectl if available)
+          if command -v k0s >/dev/null 2>&1; then
+            if k0s kubectl get nodes --no-headers 2>/dev/null | grep -q .; then
+              break
+            fi
+          else
+            # If k0s command not available, just check if service is still running after wait
+            if systemctl is-active --quiet k0scontroller 2>/dev/null || systemctl is-active --quiet k0s 2>/dev/null; then
+              break
+            fi
+          fi
+        fi
+        sleep 5
+        elapsed=$((elapsed + 5))
+      done
+      
+      # Create the bootstrap success marker file
+      mkdir -p /run/cluster-api
+      echo "success" > /run/cluster-api/bootstrap-success.complete
+      chmod 644 /run/cluster-api/bootstrap-success.complete
+
+runcmd:
+  - /usr/local/bin/kairos-bootstrap-success.sh
+
 {{- else }}
 
 # Worker node configuration
