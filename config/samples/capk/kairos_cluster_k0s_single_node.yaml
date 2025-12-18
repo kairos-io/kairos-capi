@@ -93,9 +93,14 @@ spec:
                   cores: 2
                 memory:
                   guest: 4Gi
+                firmware:
+                  bootloader:
+                    bios:
+                      useSerial: true
                 devices:
                   disks:
                   - name: rootdisk
+                    bootOrder: 1
                     disk:
                       bus: virtio
                   interfaces:

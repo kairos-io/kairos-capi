@@ -333,8 +333,10 @@ build-kairos-image: setup-osbuilder ## Build Kairos cloud image using OSArtifact
 	@echo "The built image will be served via nginx service."
 	@mkdir -p $(WORK_DIR)
 	@mkdir -p $(OSBUILDER_DIR)/build
+	@echo "Creating cloud-config Secret with console parameters..."
+	@printf '#cloud-config\n\n# Add console parameters to kernel cmdline for serial console access\n# console=ttyS0 enables serial console, console=tty0 enables VGA console\ninstall:\n  grub_options:\n    extra_cmdline: "console=ttyS0 console=tty0"\n' | kubectl create secret generic $(KAIROS_IMAGE_NAME)-cloud-config --from-file=cloud_config.yaml=/dev/stdin -n default --dry-run=client -o yaml | kubectl apply -f -
 	@echo "Creating OSArtifact CustomResource..."
-	@printf 'apiVersion: build.kairos.io/v1alpha2\nkind: OSArtifact\nmetadata:\n  name: %s\n  namespace: default\nspec:\n  imageName: "quay.io/kairos/fedora:40-core-amd64-generic-v3.6.1-beta2"\n  cloudImage: true\n  diskSize: "32000"\n  exporters:\n  - template:\n      spec:\n        restartPolicy: Never\n        containers:\n        - name: upload\n          image: quay.io/curl/curl\n          command:\n          - /bin/sh\n          args:\n          - -c\n          - |\n              for f in $$(ls /artifacts)\n              do\n              curl -T /artifacts/$$f http://osartifactbuilder-operator-osbuilder-nginx/upload/$$f\n              done\n          volumeMounts:\n          - name: artifacts\n            mountPath: /artifacts\n' $(KAIROS_IMAGE_NAME) > $(WORK_DIR)/osartifact.yaml
+	@printf 'apiVersion: build.kairos.io/v1alpha2\nkind: OSArtifact\nmetadata:\n  name: %s\n  namespace: default\nspec:\n  imageName: "quay.io/kairos/fedora:40-core-amd64-generic-v3.6.1-beta2"\n  cloudImage: true\n  diskSize: "32000"\n  cloudConfigRef:\n    name: %s-cloud-config\n    key: cloud_config.yaml\n  exporters:\n  - template:\n      spec:\n        restartPolicy: Never\n        containers:\n        - name: upload\n          image: quay.io/curl/curl\n          command:\n          - /bin/sh\n          args:\n          - -c\n          - |\n              for f in $$(ls /artifacts)\n              do\n              curl -T /artifacts/$$f http://osartifactbuilder-operator-osbuilder-nginx/upload/$$f\n              done\n          volumeMounts:\n          - name: artifacts\n            mountPath: /artifacts\n' $(KAIROS_IMAGE_NAME) $(KAIROS_IMAGE_NAME) > $(WORK_DIR)/osartifact.yaml
 	@kubectl apply -f $(WORK_DIR)/osartifact.yaml
 	@echo "Waiting for OSArtifact to be ready..."
 	@bash -c '\
@@ -428,37 +430,255 @@ install-virtctl: ## Install virtctl CLI tool
 
 .PHONY: upload-kairos-image
 upload-kairos-image: install-virtctl ## Upload Kairos image using virtctl
-	@echo "Uploading Kairos image using virtctl..."
-	@IMAGE_FILE=""; \
+	@echo "=== Uploading Kairos image using virtctl ==="
+	@bash -c '\
+	set -e; \
+	echo "[1/8] Checking for virtctl..."; \
+	if ! command -v virtctl >/dev/null 2>&1 && [ ! -f "$(BIN_DIR)/virtctl" ]; then \
+		echo "ERROR: virtctl not found in PATH or $(BIN_DIR)/virtctl"; \
+		echo "Please run '\''make -f Makefile.kubevirt install-virtctl'\'' first."; \
+		exit 1; \
+	fi; \
+	VIRTCTL_CMD=$$(command -v virtctl 2>/dev/null || echo "$(BIN_DIR)/virtctl"); \
+	echo "Using virtctl: $$VIRTCTL_CMD"; \
+	echo "[2/8] Locating image file..."; \
+	IMAGE_FILE=""; \
 	if [ -f "$(KAIROS_IMAGE_FILE)" ]; then \
 		IMAGE_FILE="$(KAIROS_IMAGE_FILE)"; \
+		echo "Found image at expected path: $$IMAGE_FILE"; \
 	elif [ -d "$(OSBUILDER_DIR)/build" ]; then \
 		IMAGE_FILE=$$(find $(OSBUILDER_DIR)/build -name "$(KAIROS_IMAGE_NAME)*" -type f \( -name "*.raw" -o -name "*.qcow2" \) | head -1); \
+		if [ -n "$$IMAGE_FILE" ]; then \
+			echo "Found image in build directory: $$IMAGE_FILE"; \
+		fi; \
 	fi; \
 	if [ -z "$$IMAGE_FILE" ] || [ ! -f "$$IMAGE_FILE" ]; then \
-		echo "Error: Image file not found."; \
+		echo "ERROR: Image file not found."; \
+		echo "Expected path: $(KAIROS_IMAGE_FILE)"; \
 		if [ -d "$(OSBUILDER_DIR)/build" ]; then \
 			echo "Available files in $(OSBUILDER_DIR)/build/:"; \
 			ls -la $(OSBUILDER_DIR)/build/ 2>/dev/null || echo "Build directory is empty."; \
 		else \
-			echo "Build directory not found. Run 'make build-kairos-image' first."; \
+			echo "Build directory not found: $(OSBUILDER_DIR)/build"; \
+			echo "Run '\''make -f Makefile.kubevirt build-kairos-image'\'' first."; \
 		fi; \
 		exit 1; \
 	fi; \
-	echo "Using image file: $$IMAGE_FILE"; \
-	export PATH=$$PATH:$(BIN_DIR) && \
-	UPLOADPROXY_IP=$$(kubectl get service cdi-uploadproxy -n cdi -o jsonpath='{.spec.clusterIP}' 2>/dev/null) && \
-	if [ -z "$$UPLOADPROXY_IP" ]; then \
-		echo "Error: CDI upload proxy not found. Make sure CDI is installed."; \
+	IMAGE_SIZE=$$(du -h "$$IMAGE_FILE" | cut -f1); \
+	echo "Image file: $$IMAGE_FILE ($$IMAGE_SIZE)"; \
+	echo "[3/8] Checking CDI upload proxy service..."; \
+	if ! kubectl get service cdi-uploadproxy -n cdi >/dev/null 2>&1; then \
+		echo "ERROR: CDI upload proxy service not found."; \
+		echo "Checking CDI installation..."; \
+		kubectl get pods -n cdi 2>/dev/null || echo "CDI namespace not found."; \
+		echo "Make sure CDI is installed: make -f Makefile.kubevirt install-cdi"; \
 		exit 1; \
-	fi && \
-	virtctl image-upload \
-		--image-path=$$IMAGE_FILE \
-		--pvc-name=$(KAIROS_IMAGE_NAME) \
-		--pvc-size=20Gi \
-		--uploadproxy-url=$$UPLOADPROXY_IP:443 \
-		--insecure || \
-	{ echo "Error: Failed to upload image."; exit 1; }
+	fi; \
+	echo "CDI upload proxy service found. Will use port-forwarding for host access."; \
+	PORT_FORWARD_PORT=$${CDI_UPLOAD_PORT:-18443}; \
+	if [ -z "$$CDI_UPLOAD_PORT" ]; then \
+		echo "Checking if port $$PORT_FORWARD_PORT is available..."; \
+		if command -v lsof >/dev/null 2>&1; then \
+			while lsof -Pi :$$PORT_FORWARD_PORT -sTCP:LISTEN -t >/dev/null 2>&1; do \
+				echo "Port $$PORT_FORWARD_PORT is in use, trying next port..."; \
+				PORT_FORWARD_PORT=$$((PORT_FORWARD_PORT + 1)); \
+				if [ $$PORT_FORWARD_PORT -gt 18500 ]; then \
+					echo "ERROR: Could not find available port between 18443-18500"; \
+					echo "Please free up a port or set CDI_UPLOAD_PORT manually"; \
+					exit 1; \
+				fi; \
+			done; \
+		elif command -v ss >/dev/null 2>&1; then \
+			while ss -lnt | grep -q ":$$PORT_FORWARD_PORT "; do \
+				echo "Port $$PORT_FORWARD_PORT is in use, trying next port..."; \
+				PORT_FORWARD_PORT=$$((PORT_FORWARD_PORT + 1)); \
+				if [ $$PORT_FORWARD_PORT -gt 18500 ]; then \
+					echo "ERROR: Could not find available port between 18443-18500"; \
+					echo "Please free up a port or set CDI_UPLOAD_PORT manually"; \
+					exit 1; \
+				fi; \
+			done; \
+		fi; \
+	fi; \
+	echo "Using local port: $$PORT_FORWARD_PORT"; \
+	echo "[4/8] Checking PVC status..."; \
+	PVC_EXISTS=$$(kubectl get pvc $(KAIROS_IMAGE_NAME) -n default -o name 2>/dev/null || echo ""); \
+	PVC_UPLOAD_READY=""; \
+	if [ -n "$$PVC_EXISTS" ]; then \
+		echo "PVC $(KAIROS_IMAGE_NAME) already exists."; \
+		PVC_UPLOAD_READY=$$(kubectl get pvc $(KAIROS_IMAGE_NAME) -n default -o jsonpath="{.metadata.annotations.cdi\.kubevirt\.io/storage\.pod\.phase}" 2>/dev/null || echo ""); \
+		if [ -z "$$PVC_UPLOAD_READY" ]; then \
+			echo "PVC exists but is not upload-ready (no CDI upload annotation)."; \
+			echo "Checking if PVC is in use..."; \
+			PVC_IN_USE=$$(kubectl get pvc $(KAIROS_IMAGE_NAME) -n default -o jsonpath="{.metadata.annotations}" 2>/dev/null | grep -q "cdi.kubevirt.io" || echo "no"); \
+			if kubectl get datavolume -n default 2>/dev/null | grep -q "$(KAIROS_IMAGE_NAME)"; then \
+				echo "ERROR: PVC is referenced by a DataVolume. Please delete it first:"; \
+				kubectl get datavolume -n default | grep "$(KAIROS_IMAGE_NAME)" || true; \
+				echo "  kubectl delete datavolume -n default --all"; \
+				exit 1; \
+			fi; \
+			if kubectl get vm -n default 2>/dev/null | grep -q "$(KAIROS_IMAGE_NAME)"; then \
+				echo "ERROR: PVC is referenced by a VM. Please delete it first:"; \
+				kubectl get vm -n default | grep "$(KAIROS_IMAGE_NAME)" || true; \
+				echo "  kubectl delete vm -n default --all"; \
+				exit 1; \
+			fi; \
+			echo "Attempting to delete PVC for fresh upload..."; \
+			if kubectl delete pvc $(KAIROS_IMAGE_NAME) -n default --wait=true --timeout=30s 2>/dev/null; then \
+				echo "PVC deleted successfully."; \
+				sleep 2; \
+				PVC_EXISTS=""; \
+			else \
+				echo "ERROR: Failed to delete PVC. It may be in use."; \
+				echo "PVC details:"; \
+				kubectl get pvc $(KAIROS_IMAGE_NAME) -n default -o yaml | grep -A 10 "status:" || true; \
+				echo "Please delete dependent resources first:"; \
+				echo "  kubectl delete vm -n default --all"; \
+				echo "  kubectl delete datavolume -n default --all"; \
+				echo "  kubectl delete pvc $(KAIROS_IMAGE_NAME) -n default"; \
+				exit 1; \
+			fi; \
+		else \
+			echo "PVC is upload-ready (annotation: $$PVC_UPLOAD_READY), proceeding with upload..."; \
+		fi; \
+	else \
+		echo "PVC does not exist, will create new one."; \
+	fi; \
+	if [ -z "$$PVC_EXISTS" ] || [ -z "$$PVC_UPLOAD_READY" ]; then \
+		echo "[5/8] Creating PVC for upload..."; \
+		if ! printf "apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: %s\n  namespace: default\nspec:\n  accessModes:\n    - ReadWriteOnce\n  storageClassName: standard\n  resources:\n    requests:\n      storage: 20Gi\n" $(KAIROS_IMAGE_NAME) | kubectl apply -f -; then \
+			echo "ERROR: Failed to create PVC."; \
+			exit 1; \
+		fi; \
+		echo "[6/8] Creating temporary pod to bind PVC (local-path requires WaitForFirstConsumer)..."; \
+		if ! printf "apiVersion: v1\nkind: Pod\nmetadata:\n  name: %s-bind-helper\n  namespace: default\nspec:\n  containers:\n  - name: pause\n    image: registry.k8s.io/pause:3.9\n  volumes:\n  - name: data\n    persistentVolumeClaim:\n      claimName: %s\n" $(KAIROS_IMAGE_NAME) $(KAIROS_IMAGE_NAME) | kubectl apply -f -; then \
+			echo "ERROR: Failed to create bind helper pod."; \
+			kubectl delete pvc $(KAIROS_IMAGE_NAME) -n default 2>/dev/null || true; \
+			exit 1; \
+		fi; \
+		echo "[7/8] Waiting for PVC to bind (timeout: 60s)..."; \
+		if ! kubectl wait --for=condition=Bound pvc/$(KAIROS_IMAGE_NAME) -n default --timeout=60s; then \
+			echo "ERROR: PVC failed to bind within timeout."; \
+			echo "PVC status:"; \
+			kubectl get pvc $(KAIROS_IMAGE_NAME) -n default -o yaml | grep -A 10 "status:" || true; \
+			echo "Pod status:"; \
+			kubectl get pod $(KAIROS_IMAGE_NAME)-bind-helper -n default -o yaml | grep -A 10 "status:" || true; \
+			kubectl delete pod $(KAIROS_IMAGE_NAME)-bind-helper -n default 2>/dev/null || true; \
+			kubectl delete pvc $(KAIROS_IMAGE_NAME) -n default 2>/dev/null || true; \
+			exit 1; \
+		fi; \
+		echo "PVC bound successfully."; \
+		echo "Deleting temporary pod..."; \
+		kubectl delete pod $(KAIROS_IMAGE_NAME)-bind-helper -n default --wait=false 2>/dev/null || true; \
+	else \
+		echo "[5/8] Skipping PVC creation (already exists and ready)."; \
+		echo "[6/8] Skipping bind helper pod (PVC already bound)."; \
+		echo "[7/8] Skipping PVC bind wait (PVC already bound)."; \
+	fi; \
+	echo "[8/8] Starting image upload to PVC $(KAIROS_IMAGE_NAME)..."; \
+	echo "Setting up port-forward to CDI upload proxy (background process)..."; \
+	echo "Checking for existing kubectl port-forward processes on port $$PORT_FORWARD_PORT..."; \
+	if command -v lsof >/dev/null 2>&1; then \
+		EXISTING_PIDS=$$(lsof -ti :$$PORT_FORWARD_PORT 2>/dev/null || true); \
+		if [ -n "$$EXISTING_PIDS" ]; then \
+			for pid in $$EXISTING_PIDS; do \
+				if ps -p $$pid -o comm= 2>/dev/null | grep -q "kubectl"; then \
+					echo "Found existing kubectl port-forward (PID: $$pid), killing it..."; \
+					kill $$pid 2>/dev/null || true; \
+				fi; \
+			done; \
+			sleep 1; \
+		fi; \
+	fi; \
+	PORT_FORWARD_LOG="/tmp/cdi-port-forward-$$$$.log"; \
+	rm -f $$PORT_FORWARD_LOG; \
+	kubectl port-forward -n cdi service/cdi-uploadproxy $$PORT_FORWARD_PORT:443 >$$PORT_FORWARD_LOG 2>&1 & \
+	PORT_FORWARD_PID=$$!; \
+	trap "kill $$PORT_FORWARD_PID 2>/dev/null || true; rm -f $$PORT_FORWARD_LOG" EXIT INT TERM; \
+	echo "Port-forward started (PID: $$PORT_FORWARD_PID), waiting for it to be ready..."; \
+	sleep 2; \
+	if ! kill -0 $$PORT_FORWARD_PID 2>/dev/null; then \
+		echo "ERROR: Port-forward process died immediately."; \
+		echo "Port-forward logs:"; \
+		cat $$PORT_FORWARD_LOG 2>/dev/null || echo "(no logs available)"; \
+		echo ""; \
+		if grep -q "address already in use\|bind.*already in use" $$PORT_FORWARD_LOG 2>/dev/null; then \
+			echo "Port $$PORT_FORWARD_PORT is already in use. Try:"; \
+			echo "  CDI_UPLOAD_PORT=18444 make -f Makefile.kubevirt upload-kairos-image"; \
+		elif grep -q "error\|Error\|ERROR\|failed\|Failed\|FAILED" $$PORT_FORWARD_LOG 2>/dev/null; then \
+			echo "Port-forward error detected. Check logs above."; \
+		fi; \
+		rm -f $$PORT_FORWARD_LOG; \
+		exit 1; \
+	fi; \
+	echo "Port-forward process is running. Verifying connection..."; \
+	MAX_WAIT=8; \
+	WAITED=0; \
+	PORT_READY=false; \
+	while [ $$WAITED -lt $$MAX_WAIT ]; do \
+		if ! kill -0 $$PORT_FORWARD_PID 2>/dev/null; then \
+			echo "ERROR: Port-forward process died during wait."; \
+			echo "Port-forward logs:"; \
+			cat $$PORT_FORWARD_LOG 2>/dev/null || echo "(no logs available)"; \
+			rm -f $$PORT_FORWARD_LOG; \
+			exit 1; \
+		fi; \
+		if command -v nc >/dev/null 2>&1; then \
+			if nc -z localhost $$PORT_FORWARD_PORT 2>/dev/null; then \
+				echo "Port-forward is ready (port $$PORT_FORWARD_PORT is listening)"; \
+				PORT_READY=true; \
+				break; \
+			fi; \
+		elif command -v timeout >/dev/null 2>&1 && command -v bash >/dev/null 2>&1; then \
+			if timeout 1 bash -c "echo > /dev/tcp/localhost/$$PORT_FORWARD_PORT" 2>/dev/null; then \
+				echo "Port-forward is ready (port $$PORT_FORWARD_PORT is listening)"; \
+				PORT_READY=true; \
+				break; \
+			fi; \
+		else \
+			echo "Cannot verify port (nc/timeout not available), assuming ready after delay..."; \
+			sleep 2; \
+			PORT_READY=true; \
+			break; \
+		fi; \
+		sleep 1; \
+		WAITED=$$((WAITED + 1)); \
+	done; \
+	if [ "$$PORT_READY" != "true" ]; then \
+		echo "WARNING: Could not verify port-forward is ready, but proceeding anyway..."; \
+		echo "If upload fails, check port-forward logs: cat $$PORT_FORWARD_LOG"; \
+	fi; \
+	UPLOADPROXY_URL="https://localhost:$$PORT_FORWARD_PORT"; \
+	echo "Upload proxy URL (via port-forward): $$UPLOADPROXY_URL"; \
+	echo "Command: $$VIRTCTL_CMD image-upload pvc $(KAIROS_IMAGE_NAME) --image-path=$$IMAGE_FILE --size=20Gi --no-create --uploadproxy-url=$$UPLOADPROXY_URL --insecure"; \
+	export PATH=$$PATH:$(BIN_DIR); \
+	UPLOAD_SUCCESS=false; \
+	if $$VIRTCTL_CMD image-upload \
+		pvc $(KAIROS_IMAGE_NAME) \
+		--image-path="$$IMAGE_FILE" \
+		--size=20Gi \
+		--no-create \
+		--uploadproxy-url=$$UPLOADPROXY_URL \
+		--insecure; then \
+		UPLOAD_SUCCESS=true; \
+	fi; \
+	kill $$PORT_FORWARD_PID 2>/dev/null || true; \
+	wait $$PORT_FORWARD_PID 2>/dev/null || true; \
+	if [ "$$UPLOAD_SUCCESS" != "true" ]; then \
+		echo ""; \
+		echo "ERROR: virtctl image-upload failed."; \
+		echo "Checking CDI upload proxy pod logs..."; \
+		kubectl logs -n cdi -l app=containerized-data-importer --tail=20 2>/dev/null || echo "Could not retrieve logs."; \
+		echo ""; \
+		echo "Checking PVC status..."; \
+		kubectl get pvc $(KAIROS_IMAGE_NAME) -n default -o yaml | grep -A 20 "status:" || true; \
+		echo ""; \
+		echo "Checking for upload pods..."; \
+		kubectl get pods -n cdi | grep upload || echo "No upload pods found."; \
+		exit 1; \
+	fi; \
+	echo ""; \
+	echo "✓ Image upload completed successfully!"'
 	@echo "Kairos image uploaded ✓"
 
 ##@ Kairos CAPI Provider
