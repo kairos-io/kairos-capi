@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/spf13/cobra"
 )
@@ -109,7 +109,7 @@ func installCapi() error {
 
 	// Get bin directory
 	binDir := filepath.Join(".", "bin")
-	
+
 	// Set PATH to include bin directory
 	path := os.Getenv("PATH")
 	if path != "" {
@@ -124,7 +124,7 @@ func installCapi() error {
 	clusterctlCmd.Env = append(os.Environ(), "PATH="+path)
 	clusterctlCmd.Stdout = os.Stdout
 	clusterctlCmd.Stderr = os.Stderr
-	
+
 	if err := clusterctlCmd.Run(); err != nil {
 		return fmt.Errorf("failed to initialize CAPI: %w", err)
 	}
@@ -159,7 +159,7 @@ func uninstallCapi() error {
 
 	// Get bin directory
 	binDir := filepath.Join(".", "bin")
-	
+
 	// Set PATH to include bin directory
 	path := os.Getenv("PATH")
 	if path != "" {
@@ -173,7 +173,7 @@ func uninstallCapi() error {
 	clusterctlCmd.Env = append(os.Environ(), "PATH="+path)
 	clusterctlCmd.Stdout = os.Stdout
 	clusterctlCmd.Stderr = os.Stderr
-	
+
 	if err := clusterctlCmd.Run(); err != nil {
 		return fmt.Errorf("failed to uninstall CAPI: %w", err)
 	}

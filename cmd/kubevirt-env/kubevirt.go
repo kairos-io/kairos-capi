@@ -15,9 +15,9 @@ import (
 )
 
 const (
-	kubevirtVersion    = "v1.3.0"
+	kubevirtVersion     = "v1.3.0"
 	kubevirtOperatorURL = "https://github.com/kubevirt/kubevirt/releases/download/%s/kubevirt-operator.yaml"
-	kubevirtCRURL      = "https://github.com/kubevirt/kubevirt/releases/download/%s/kubevirt-cr.yaml"
+	kubevirtCRURL       = "https://github.com/kubevirt/kubevirt/releases/download/%s/kubevirt-cr.yaml"
 )
 
 func newInstallKubevirtCmd() *cobra.Command {

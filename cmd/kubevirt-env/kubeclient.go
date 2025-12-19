@@ -42,7 +42,7 @@ func getKubeClient() (kubernetes.Interface, error) {
 
 func getKubeConfig() (*rest.Config, error) {
 	kubeconfigPath := getKubeconfigPath()
-	
+
 	// Check if kubeconfig exists
 	if _, err := os.Stat(kubeconfigPath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("kubeconfig not found at %s. Please create the cluster first with: kubevirt-env create-test-cluster", kubeconfigPath)

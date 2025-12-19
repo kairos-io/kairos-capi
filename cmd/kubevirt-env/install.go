@@ -15,6 +15,8 @@ func newInstallCmd() *cobra.Command {
 	cmd.AddCommand(newInstallKubevirtCmd())
 	cmd.AddCommand(newInstallCapiCmd())
 	cmd.AddCommand(newInstallOsbuilderCmd())
+	cmd.AddCommand(newInstallCertManagerCmd())
+	cmd.AddCommand(newInstallKairosProviderCmd())
 
 	return cmd
 }

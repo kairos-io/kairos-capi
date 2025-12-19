@@ -15,6 +15,8 @@ func newUninstallCmd() *cobra.Command {
 	cmd.AddCommand(newUninstallKubevirtCmd())
 	cmd.AddCommand(newUninstallCapiCmd())
 	cmd.AddCommand(newUninstallOsbuilderCmd())
+	cmd.AddCommand(newUninstallCertManagerCmd())
+	cmd.AddCommand(newUninstallKairosProviderCmd())
 
 	return cmd
 }

@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	calicoVersion    = "v3.29.1"
+	calicoVersion     = "v3.29.1"
 	calicoManifestURL = "https://raw.githubusercontent.com/projectcalico/calico/%s/manifests/calico.yaml"
 )
 
