@@ -28,6 +28,7 @@ func main() {
 	viper.BindEnv("cluster-name", "CLUSTER_NAME")
 
 	rootCmd.AddCommand(newCreateTestClusterCmd())
+	rootCmd.AddCommand(newInstallCalicoCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -48,4 +49,13 @@ func getClusterName() string {
 func getWorkDir() string {
 	clusterName := getClusterName()
 	return filepath.Join(".work-kubevirt-" + clusterName)
+}
+
+func getKubeconfigPath() string {
+	return filepath.Join(getWorkDir(), "kubeconfig")
+}
+
+func getKubectlContext() string {
+	clusterName := getClusterName()
+	return fmt.Sprintf("kind-%s", clusterName)
 }

@@ -105,9 +105,21 @@ nodes:
 		return fmt.Errorf("failed to create kind cluster: %w", err)
 	}
 
+	// Save kubeconfig to work directory
+	kubeconfigPath := getKubeconfigPath()
+	fmt.Printf("Saving kubeconfig to %s...\n", kubeconfigPath)
+	kindCmd = exec.Command("kind", "get", "kubeconfig", "--name", clusterName)
+	output, err = kindCmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to get kubeconfig: %w", err)
+	}
+	if err := os.WriteFile(kubeconfigPath, output, 0600); err != nil {
+		return fmt.Errorf("failed to save kubeconfig: %w", err)
+	}
+
 	// Show cluster info
 	fmt.Printf("Showing cluster info for context kind-%s...\n", clusterName)
-	kubectlCmd := exec.Command("kubectl", "cluster-info", "--context", fmt.Sprintf("kind-%s", clusterName))
+	kubectlCmd := exec.Command("kubectl", "cluster-info", "--context", getKubectlContext(), "--kubeconfig", kubeconfigPath)
 	kubectlCmd.Stdout = os.Stdout
 	kubectlCmd.Stderr = os.Stderr
 	if err := kubectlCmd.Run(); err != nil {
@@ -115,7 +127,7 @@ nodes:
 	}
 
 	fmt.Println("Kind cluster created ✓")
-	fmt.Println("Note: Default CNI is disabled. Install Calico with: make install-calico")
+	fmt.Println("Note: Default CNI is disabled. Install Calico with: kubevirt-env install-calico")
 
 	return nil
 }
