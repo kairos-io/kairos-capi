@@ -32,6 +32,7 @@ func main() {
 	rootCmd.AddCommand(newUninstallCmd())
 	rootCmd.AddCommand(newReinstallCmd())
 	rootCmd.AddCommand(newBuildKairosImageCmd())
+	rootCmd.AddCommand(newUploadKairosImageCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

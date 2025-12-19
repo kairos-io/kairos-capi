@@ -19,11 +19,17 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
+	"os/exec"
+	"os/signal"
+	"strconv"
+	"syscall"
+
 	"github.com/spf13/cobra"
 )
 
 const (
 	kairosImageName = "kairos-kubevirt"
+	defaultPort     = 18443
 )
 
 func newBuildKairosImageCmd() *cobra.Command {
@@ -48,6 +54,192 @@ func newBuildKairosImageCmd() *cobra.Command {
 
 func getKairosImageBuildDir() string {
 	return filepath.Join(getWorkDir(), "osbuilder", "build")
+}
+
+func newUploadKairosImageCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "upload-kairos-image",
+		Short: "Upload Kairos image to KubeVirt",
+		Long:  "Upload Kairos image to KubeVirt as a DataVolume using virtctl",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return uploadKairosImage()
+		},
+	}
+
+	return cmd
+}
+
+func uploadKairosImage() error {
+	fmt.Println("=== Uploading Kairos image using virtctl ===")
+
+	// Find image file
+	imageFile, err := findKairosImageFile()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Using image file: %s\n", imageFile)
+
+	// Check virtctl
+	virtctlPath, err := findVirtctl()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Using virtctl: %s\n", virtctlPath)
+
+	// Check CDI is installed
+	clientset, err := getKubeClient()
+	if err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+	_, err = clientset.CoreV1().Services("cdi").Get(ctx, "cdi-uploadproxy", metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("CDI upload proxy service not found. Make sure CDI is installed: %w", err)
+	}
+
+	// Delete existing DataVolume if present
+	config, err := getKubeConfig()
+	if err != nil {
+		return err
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return fmt.Errorf("failed to create dynamic client: %w", err)
+	}
+
+	dvGVR := schema.GroupVersionResource{
+		Group:    "cdi.kubevirt.io",
+		Version:  "v1beta1",
+		Resource: "datavolumes",
+	}
+
+	_, err = dynamicClient.Resource(dvGVR).Namespace("default").Get(ctx, kairosImageName, metav1.GetOptions{})
+	if err == nil {
+		fmt.Printf("DataVolume %s already exists. Deleting for fresh upload...\n", kairosImageName)
+		err = dynamicClient.Resource(dvGVR).Namespace("default").Delete(ctx, kairosImageName, metav1.DeleteOptions{})
+		if err != nil {
+			fmt.Printf("Warning: Failed to delete existing DataVolume: %v\n", err)
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	// Set up port-forward
+	port := defaultPort
+	if envPort := os.Getenv("CDI_UPLOAD_PORT"); envPort != "" {
+		if p, err := strconv.Atoi(envPort); err == nil {
+			port = p
+		}
+	}
+
+	fmt.Printf("Setting up port-forward on port %d...\n", port)
+	kubeconfigPath := getKubeconfigPath()
+	kubectlContext := getKubectlContext()
+
+	portForwardCmd := exec.Command("kubectl", "port-forward", "-n", "cdi", "service/cdi-uploadproxy",
+		fmt.Sprintf("%d:443", port), "--kubeconfig", kubeconfigPath, "--context", kubectlContext)
+	portForwardCmd.Stdout = os.Stdout
+	portForwardCmd.Stderr = os.Stderr
+
+	if err := portForwardCmd.Start(); err != nil {
+		return fmt.Errorf("failed to start port-forward: %w", err)
+	}
+
+	// Set up signal handling to cleanup port-forward
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		portForwardCmd.Process.Kill()
+		os.Exit(1)
+	}()
+
+	defer func() {
+		if portForwardCmd.Process != nil {
+			portForwardCmd.Process.Kill()
+			portForwardCmd.Wait()
+		}
+	}()
+
+	// Wait a bit for port-forward to be ready
+	time.Sleep(2 * time.Second)
+
+	// Run virtctl upload
+	uploadProxyURL := fmt.Sprintf("https://localhost:%d", port)
+	fmt.Printf("Upload proxy URL: %s\n", uploadProxyURL)
+	fmt.Println("Starting upload with virtctl...")
+
+	virtctlCmd := exec.Command(virtctlPath, "image-upload",
+		"dv", kairosImageName,
+		"--size=25Gi",
+		"--access-mode=ReadWriteOnce",
+		"--image-path", imageFile,
+		"--uploadproxy-url", uploadProxyURL,
+		"--insecure",
+		"--force-bind",
+		"--wait-secs=300",
+		"--kubeconfig", kubeconfigPath,
+		"--context", kubectlContext,
+	)
+	virtctlCmd.Stdout = os.Stdout
+	virtctlCmd.Stderr = os.Stderr
+
+	if err := virtctlCmd.Run(); err != nil {
+		return fmt.Errorf("virtctl image-upload failed: %w", err)
+	}
+
+	fmt.Println("\n✓ Image upload completed successfully!")
+	fmt.Printf("DataVolume %s is ready for use.\n", kairosImageName)
+	return nil
+}
+
+func findKairosImageFile() (string, error) {
+	// Check KAIROS_IMAGE_FILE env var
+	if envFile := os.Getenv("KAIROS_IMAGE_FILE"); envFile != "" {
+		if _, err := os.Stat(envFile); err == nil {
+			return envFile, nil
+		}
+	}
+
+	// Check default location
+	defaultFile := filepath.Join(getKairosImageBuildDir(), fmt.Sprintf("%s.raw", kairosImageName))
+	if _, err := os.Stat(defaultFile); err == nil {
+		return defaultFile, nil
+	}
+
+	// Search build directory
+	buildDir := getKairosImageBuildDir()
+	if entries, err := os.ReadDir(buildDir); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				name := entry.Name()
+				if strings.HasPrefix(name, kairosImageName) {
+					ext := filepath.Ext(name)
+					if ext == ".raw" || ext == ".qcow2" {
+						return filepath.Join(buildDir, name), nil
+					}
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("image file not found. Expected: %s or in %s", defaultFile, buildDir)
+}
+
+func findVirtctl() (string, error) {
+	// Check PATH
+	if path, err := exec.LookPath("virtctl"); err == nil {
+		return path, nil
+	}
+
+	// Check bin directory
+	binPath := filepath.Join(".", "bin", "virtctl")
+	if _, err := os.Stat(binPath); err == nil {
+		return binPath, nil
+	}
+
+	return "", fmt.Errorf("virtctl not found in PATH or ./bin/virtctl. Please install virtctl first")
 }
 
 func buildKairosImage() error {
