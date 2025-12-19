@@ -85,6 +85,17 @@ func applyManifestFromURL(dynamicClient dynamic.Interface, config *rest.Config, 
 		return fmt.Errorf("failed to download manifest: HTTP %d", resp.StatusCode)
 	}
 
+	// Read content into byte slice
+	yamlContent, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read manifest content: %w", err)
+	}
+
+	// Apply using the shared function
+	return applyManifestContent(dynamicClient, config, yamlContent)
+}
+
+func applyManifestContent(dynamicClient dynamic.Interface, config *rest.Config, yamlContent []byte) error {
 	// Create discovery client for REST mapper
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(config)
 	if err != nil {
@@ -99,7 +110,7 @@ func applyManifestFromURL(dynamicClient dynamic.Interface, config *rest.Config, 
 	mapper := restmapper.NewDiscoveryRESTMapper(gr)
 
 	// Parse YAML and apply each resource
-	decoder := yaml.NewYAMLOrJSONDecoder(resp.Body, 4096)
+	decoder := yaml.NewYAMLOrJSONDecoder(strings.NewReader(string(yamlContent)), 4096)
 	dec := yamlserializer.NewDecodingSerializer(unstructured.UnstructuredJSONScheme)
 
 	for {
