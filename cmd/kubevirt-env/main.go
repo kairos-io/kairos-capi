@@ -28,6 +28,8 @@ func main() {
 	viper.BindEnv("cluster-name", "CLUSTER_NAME")
 
 	rootCmd.AddCommand(newCreateTestClusterCmd())
+	rootCmd.AddCommand(newSetupCmd())
+	rootCmd.AddCommand(newCleanupCmd())
 	rootCmd.AddCommand(newInstallCmd())
 	rootCmd.AddCommand(newUninstallCmd())
 	rootCmd.AddCommand(newReinstallCmd())

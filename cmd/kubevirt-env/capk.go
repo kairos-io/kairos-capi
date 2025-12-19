@@ -129,9 +129,7 @@ func installCapk() error {
 		return fmt.Errorf("failed to initialize CAPK: %w", err)
 	}
 
-	fmt.Println("Waiting for CAPK components to be ready...")
-	fmt.Println("Note: Some controllers may still be initializing. This can take a few minutes.")
-	
+	fmt.Println("Waiting for CAPK infrastructure controller...")
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer waitCancel()
 
@@ -140,23 +138,8 @@ func installCapk() error {
 		return err
 	}
 
-	fmt.Println("Waiting for CAPK bootstrap controller...")
-	if err := waitForDeployment(waitCtx, clientset, "capi-kubevirt-bootstrap-system", "capi-kubevirt-bootstrap-controller-manager"); err != nil {
-		fmt.Printf("Warning: CAPK bootstrap controller may not be fully ready: %v\n", err)
-		fmt.Println("Note: Controllers may still be initializing. Check with: kubectl get pods -n capi-kubevirt-bootstrap-system")
-	} else {
-		fmt.Println("✓ CAPK bootstrap controller is ready")
-	}
-
-	fmt.Println("Waiting for CAPK control plane controller...")
-	if err := waitForDeployment(waitCtx, clientset, "capi-kubevirt-control-plane-system", "capi-kubevirt-control-plane-controller-manager"); err != nil {
-		fmt.Printf("Warning: CAPK control plane controller may not be fully ready: %v\n", err)
-		fmt.Println("Note: Controllers may still be initializing. Check with: kubectl get pods -n capi-kubevirt-control-plane-system")
-	} else {
-		fmt.Println("✓ CAPK control plane controller is ready")
-	}
-
-	fmt.Println("Waiting for CAPK infrastructure controller...")
+	// Only wait for CAPK infrastructure controller
+	// Note: We skip kubeadm bootstrap/control plane controllers since we use Kairos controllers
 	if err := waitForDeployment(waitCtx, clientset, "capk-system", "capk-controller-manager"); err != nil {
 		fmt.Printf("Warning: CAPK infrastructure controller may not be fully ready: %v\n", err)
 		fmt.Println("Note: Controllers may still be initializing. Check with: kubectl get pods -n capk-system")
