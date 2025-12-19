@@ -14,6 +14,7 @@ func newReinstallCmd() *cobra.Command {
 	cmd.AddCommand(newReinstallCalicoCmd())
 	cmd.AddCommand(newReinstallKubevirtCmd())
 	cmd.AddCommand(newReinstallCapiCmd())
+	cmd.AddCommand(newReinstallOsbuilderCmd())
 
 	return cmd
 }
