@@ -78,12 +78,12 @@ spec:
                 - ReadWriteOnce
                 resources:
                   requests:
-                    storage: 20Gi
+                    storage: 30Gi
                 # TODO: Set storageClassName if needed
                 # storageClassName: standard
               source:
                 pvc:
-                  name: kairos-kubevirt-upload
+                  name: kairos-kubevirt
                   namespace: default
           running: true
           template:

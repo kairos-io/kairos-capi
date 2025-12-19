@@ -494,12 +494,12 @@ upload-kairos-image: install-virtctl ## Upload Kairos image using virtctl
 		fi; \
 	fi; \
 	echo "Using local port: $$PORT_FORWARD_PORT"; \
-	echo "[4/5] Checking for existing DataVolume..."; \
-	if kubectl get datavolume $(KAIROS_IMAGE_NAME)-upload -n default >/dev/null 2>&1; then \
-		echo "DataVolume $(KAIROS_IMAGE_NAME)-upload already exists. Deleting for fresh upload..."; \
-		kubectl delete datavolume $(KAIROS_IMAGE_NAME)-upload -n default --wait=true --timeout=30s 2>/dev/null || true; \
-		sleep 2; \
-	fi; \
+		echo "[4/5] Checking for existing DataVolume..."; \
+		if kubectl get datavolume $(KAIROS_IMAGE_NAME) -n default >/dev/null 2>&1; then \
+			echo "DataVolume $(KAIROS_IMAGE_NAME) already exists. Deleting for fresh upload..."; \
+			kubectl delete datavolume $(KAIROS_IMAGE_NAME) -n default --wait=true --timeout=30s 2>/dev/null || true; \
+			sleep 2; \
+		fi; \
 	echo "[5/5] Setting up port-forward and starting upload with virtctl..."; \
 	echo "virtctl will create the DataVolume and handle upload pod creation automatically."; \
 	echo "Checking for existing kubectl port-forward processes on port $$PORT_FORWARD_PORT..."; \
@@ -577,10 +577,10 @@ upload-kairos-image: install-virtctl ## Upload Kairos image using virtctl
 	echo "Upload proxy URL (via port-forward): $$UPLOADPROXY_URL"; \
 	export PATH=$$PATH:$(BIN_DIR); \
 	echo "Starting upload with virtctl (this will create DataVolume and upload pod automatically)..."; \
-	echo "Command: $$VIRTCTL_CMD image-upload dv $(KAIROS_IMAGE_NAME)-upload --size=20Gi --access-mode=ReadWriteOnce --image-path=$$IMAGE_FILE --uploadproxy-url=$$UPLOADPROXY_URL --insecure --force-bind --wait-secs=300"; \
+	echo "Command: $$VIRTCTL_CMD image-upload dv $(KAIROS_IMAGE_NAME) --size=25Gi --access-mode=ReadWriteOnce --image-path=$$IMAGE_FILE --uploadproxy-url=$$UPLOADPROXY_URL --insecure --force-bind --wait-secs=300"; \
 	if ! $$VIRTCTL_CMD image-upload \
-		dv $(KAIROS_IMAGE_NAME)-upload \
-		--size=20Gi \
+		dv $(KAIROS_IMAGE_NAME) \
+		--size=25Gi \
 		--access-mode=ReadWriteOnce \
 		--image-path="$$IMAGE_FILE" \
 		--uploadproxy-url=$$UPLOADPROXY_URL \
@@ -590,16 +590,16 @@ upload-kairos-image: install-virtctl ## Upload Kairos image using virtctl
 		echo ""; \
 		echo "ERROR: virtctl image-upload failed."; \
 		echo "Checking DataVolume status..."; \
-		kubectl get datavolume $(KAIROS_IMAGE_NAME)-upload -n default -o yaml 2>/dev/null | grep -A 20 "status:" || echo "DataVolume not found."; \
+		kubectl get datavolume $(KAIROS_IMAGE_NAME) -n default -o yaml 2>/dev/null | grep -A 20 "status:" || echo "DataVolume not found."; \
 		echo ""; \
 		echo "Checking for upload pods..."; \
 		kubectl get pods -n default | grep "cdi-upload" | grep "$(KAIROS_IMAGE_NAME)" || echo "No upload pods found."; \
 		echo ""; \
 		echo "Checking PVC status..."; \
-		kubectl get pvc $(KAIROS_IMAGE_NAME)-upload -n default -o yaml 2>/dev/null | grep -A 10 "status:" || echo "PVC not found."; \
+		kubectl get pvc $(KAIROS_IMAGE_NAME) -n default -o yaml 2>/dev/null | grep -A 10 "status:" || echo "PVC not found."; \
 		echo ""; \
 		echo "Checking events..."; \
-		kubectl get events -n default --field-selector involvedObject.name=$(KAIROS_IMAGE_NAME)-upload --sort-by='.lastTimestamp' | tail -10 || true; \
+		kubectl get events -n default --field-selector involvedObject.name=$(KAIROS_IMAGE_NAME) --sort-by='.lastTimestamp' | tail -10 || true; \
 		kill $$PORT_FORWARD_PID 2>/dev/null || true; \
 		rm -f $$PORT_FORWARD_LOG; \
 		exit 1; \
@@ -609,7 +609,7 @@ upload-kairos-image: install-virtctl ## Upload Kairos image using virtctl
 	rm -f $$PORT_FORWARD_LOG; \
 	echo ""; \
 	echo "✓ Image upload completed successfully!"; \
-	echo "DataVolume $(KAIROS_IMAGE_NAME)-upload is ready for use."'
+	echo "DataVolume $(KAIROS_IMAGE_NAME) is ready for use."'
 	@echo "Kairos image uploaded ✓"
 
 ##@ Kairos CAPI Provider
