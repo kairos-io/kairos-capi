@@ -5,8 +5,8 @@
 # SETUP INSTRUCTIONS:
 # 
 # 1. Make sure you have completed the setup:
-#    - make -f Makefile.kubevirt setup
-#    - make -f Makefile.kubevirt upload-kairos-image (to upload the Kairos image)
+#    - kubevirt-env setup (or individual install commands)
+#    - kubevirt-env upload-kairos-image (to upload the Kairos image)
 #
 # 2. Update the KubeVirtMachineTemplate below:
 #    - Set the storageClassName if needed
