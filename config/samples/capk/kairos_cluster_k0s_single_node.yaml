@@ -83,7 +83,7 @@ spec:
                 # storageClassName: standard
               source:
                 pvc:
-                  name: kairos-kubevirt
+                  name: kairos-kubevirt-upload
                   namespace: default
           running: true
           template:
@@ -93,10 +93,6 @@ spec:
                   cores: 2
                 memory:
                   guest: 4Gi
-                firmware:
-                  bootloader:
-                    bios:
-                      useSerial: true
                 devices:
                   disks:
                   - name: rootdisk
@@ -106,6 +102,15 @@ spec:
                   interfaces:
                   - name: default
                     masquerade: {}
+                features:
+                  acpi:
+                    enabled: true
+                # Use UEFI boot (image has GPT partition table with EFI System partition)
+                # Disable secure boot to avoid boot issues
+                firmware:
+                  bootloader:
+                    efi:
+                      secureBoot: false
               networks:
               - name: default
                 pod: {}
