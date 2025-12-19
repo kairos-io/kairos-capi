@@ -274,3 +274,14 @@ func waitForDaemonset(ctx context.Context, clientset kubernetes.Interface, names
 		return false, nil
 	})
 }
+
+func waitForNamespaceDeleted(ctx context.Context, clientset kubernetes.Interface, namespace string) error {
+	return wait.PollUntilContextCancel(ctx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
+		_, err := clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+		if err != nil {
+			// Namespace not found means it's deleted
+			return true, nil
+		}
+		return false, nil
+	})
+}

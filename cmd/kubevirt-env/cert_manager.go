@@ -8,9 +8,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/kubernetes"
 
 	"github.com/spf13/cobra"
 )
@@ -197,16 +195,4 @@ func uninstallCertManager() error {
 
 	fmt.Println("cert-manager uninstalled ✓")
 	return nil
-}
-
-func waitForNamespaceDeleted(ctx context.Context, clientset kubernetes.Interface, namespace string) error {
-	return wait.PollUntilContextCancel(ctx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
-		_, err := clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
-		if err != nil {
-			// Namespace doesn't exist, it's deleted
-			return true, nil
-		}
-		// Namespace still exists (or is terminating)
-		return false, nil
-	})
 }

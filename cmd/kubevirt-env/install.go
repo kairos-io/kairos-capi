@@ -12,6 +12,7 @@ func newInstallCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newInstallCalicoCmd())
+	cmd.AddCommand(newInstallCdiCmd())
 	cmd.AddCommand(newInstallKubevirtCmd())
 	cmd.AddCommand(newInstallCapiCmd())
 	cmd.AddCommand(newInstallOsbuilderCmd())

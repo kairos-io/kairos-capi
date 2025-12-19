@@ -12,6 +12,7 @@ func newUninstallCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newUninstallCalicoCmd())
+	cmd.AddCommand(newUninstallCdiCmd())
 	cmd.AddCommand(newUninstallKubevirtCmd())
 	cmd.AddCommand(newUninstallCapiCmd())
 	cmd.AddCommand(newUninstallOsbuilderCmd())
