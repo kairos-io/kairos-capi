@@ -6,6 +6,8 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/dynamic"
 
 	"github.com/spf13/cobra"
@@ -29,7 +31,47 @@ func newInstallCalicoCmd() *cobra.Command {
 	return cmd
 }
 
+func isCalicoInstalled() bool {
+	clientset, err := getKubeClient()
+	if err != nil {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Check if calico-node daemonset exists and is ready
+	ds, err := clientset.AppsV1().DaemonSets("kube-system").Get(ctx, "calico-node", metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+
+	// Check if deployment exists
+	deployment, err := clientset.AppsV1().Deployments("kube-system").Get(ctx, "calico-kube-controllers", metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+
+	// Check if both are ready
+	dsReady := ds.Status.NumberReady == ds.Status.DesiredNumberScheduled && ds.Status.DesiredNumberScheduled > 0
+	deploymentReady := false
+	for _, condition := range deployment.Status.Conditions {
+		if condition.Type == appsv1.DeploymentAvailable && condition.Status == corev1.ConditionTrue {
+			deploymentReady = true
+			break
+		}
+	}
+
+	return dsReady && deploymentReady
+}
+
 func installCalico() error {
+	// Check if Calico is already installed
+	if isCalicoInstalled() {
+		fmt.Println("Calico CNI is already installed ✓")
+		return nil
+	}
+
 	clientset, err := getKubeClient()
 	if err != nil {
 		return err

@@ -33,7 +33,55 @@ func newInstallKubevirtCmd() *cobra.Command {
 	return cmd
 }
 
+func isKubeVirtInstalled() bool {
+	config, err := getKubeConfig()
+	if err != nil {
+		return false
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	kubevirt, err := getKubeVirtCR(ctx, dynamicClient)
+	if err != nil {
+		return false
+	}
+
+	// Check for Available condition
+	conditions, found, err := unstructured.NestedSlice(kubevirt.Object, "status", "conditions")
+	if found && err == nil {
+		for _, cond := range conditions {
+			if condMap, ok := cond.(map[string]interface{}); ok {
+				if condType, _ := condMap["type"].(string); condType == "Available" {
+					if status, _ := condMap["status"].(string); status == "True" {
+						return true
+					}
+				}
+			}
+		}
+	}
+
+	// Check for Deployed phase
+	phase, found, err := unstructured.NestedString(kubevirt.Object, "status", "phase")
+	if found && err == nil && phase == "Deployed" {
+		return true
+	}
+
+	return false
+}
+
 func installKubevirt() error {
+	// Check if KubeVirt is already installed
+	if isKubeVirtInstalled() {
+		fmt.Println("KubeVirt is already installed ✓")
+		return nil
+	}
+
 	clientset, err := getKubeClient()
 	if err != nil {
 		return err

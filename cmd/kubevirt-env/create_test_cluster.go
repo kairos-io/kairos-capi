@@ -36,19 +36,41 @@ func validateKindInstalled() error {
 	return nil
 }
 
-func createTestCluster(clusterName string) error {
-	// Check if cluster already exists
+func isClusterReady(clusterName string) bool {
+	// Check if cluster exists
 	kindCmd := exec.Command("kind", "get", "clusters")
 	output, err := kindCmd.Output()
 	if err != nil {
-		return fmt.Errorf("failed to check existing clusters: %w", err)
+		return false
 	}
 
 	clusters := strings.Split(strings.TrimSpace(string(output)), "\n")
+	clusterExists := false
 	for _, line := range clusters {
 		if strings.TrimSpace(line) == clusterName {
-			return fmt.Errorf("cluster '%s' already exists. Delete it first with: kind delete cluster --name %s", clusterName, clusterName)
+			clusterExists = true
+			break
 		}
+	}
+
+	if !clusterExists {
+		return false
+	}
+
+	// Check if kubeconfig exists
+	kubeconfigPath := getKubeconfigPath()
+	if _, err := os.Stat(kubeconfigPath); os.IsNotExist(err) {
+		return false
+	}
+
+	return true
+}
+
+func createTestCluster(clusterName string) error {
+	// Check if cluster already exists and is ready
+	if isClusterReady(clusterName) {
+		fmt.Printf("Cluster '%s' already exists and is ready ✓\n", clusterName)
+		return nil
 	}
 
 	// Get work directory
@@ -98,7 +120,7 @@ nodes:
 
 	// Create cluster
 	fmt.Printf("Creating kind cluster '%s'...\n", clusterName)
-	kindCmd = exec.Command("kind", "create", "cluster", "--name", clusterName, "--config", kindConfigPath)
+	kindCmd := exec.Command("kind", "create", "cluster", "--name", clusterName, "--config", kindConfigPath)
 	kindCmd.Stdout = os.Stdout
 	kindCmd.Stderr = os.Stderr
 	if err := kindCmd.Run(); err != nil {
@@ -109,7 +131,7 @@ nodes:
 	kubeconfigPath := getKubeconfigPath()
 	fmt.Printf("Saving kubeconfig to %s...\n", kubeconfigPath)
 	kindCmd = exec.Command("kind", "get", "kubeconfig", "--name", clusterName)
-	output, err = kindCmd.Output()
+	output, err := kindCmd.Output()
 	if err != nil {
 		return fmt.Errorf("failed to get kubeconfig: %w", err)
 	}
