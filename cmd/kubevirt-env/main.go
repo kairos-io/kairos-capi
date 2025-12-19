@@ -33,6 +33,9 @@ func main() {
 	rootCmd.AddCommand(newReinstallCmd())
 	rootCmd.AddCommand(newBuildKairosImageCmd())
 	rootCmd.AddCommand(newUploadKairosImageCmd())
+	rootCmd.AddCommand(newTestControlPlaneCmd())
+	rootCmd.AddCommand(newTestClusterStatusCmd())
+	rootCmd.AddCommand(newDeleteTestClusterCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
