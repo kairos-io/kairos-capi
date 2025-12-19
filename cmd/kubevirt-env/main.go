@@ -30,6 +30,7 @@ func main() {
 	rootCmd.AddCommand(newCreateTestClusterCmd())
 	rootCmd.AddCommand(newInstallCalicoCmd())
 	rootCmd.AddCommand(newInstallKubevirtCmd())
+	rootCmd.AddCommand(newInstallCapiCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
