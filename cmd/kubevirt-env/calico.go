@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 
 	"github.com/spf13/cobra"
@@ -20,7 +20,7 @@ const (
 
 func newInstallCalicoCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "install-calico",
+		Use:   "calico",
 		Short: "Install Calico CNI",
 		Long:  "Install Calico CNI (required for LoadBalancer support in KubeVirt)",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -28,6 +28,34 @@ func newInstallCalicoCmd() *cobra.Command {
 		},
 	}
 
+	return cmd
+}
+
+func newUninstallCalicoCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "calico",
+		Short: "Uninstall Calico CNI",
+		Long:  "Uninstall Calico CNI from the cluster",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return uninstallCalico()
+		},
+	}
+
+	return cmd
+}
+
+func newReinstallCalicoCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "calico",
+		Short: "Reinstall Calico CNI",
+		Long:  "Uninstall and reinstall Calico CNI",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := uninstallCalico(); err != nil {
+				return fmt.Errorf("failed to uninstall Calico: %w", err)
+			}
+			return installCalico()
+		},
+	}
 	return cmd
 }
 
@@ -120,4 +148,41 @@ func installCalico() error {
 	return nil
 }
 
+func uninstallCalico() error {
+	// Check if Calico is installed
+	if !isCalicoInstalled() {
+		fmt.Println("Calico CNI is not installed")
+		return nil
+	}
 
+	config, err := getKubeConfig()
+	if err != nil {
+		return err
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return fmt.Errorf("failed to create dynamic client: %w", err)
+	}
+
+	fmt.Println("Uninstalling Calico CNI...")
+	calicoURL := fmt.Sprintf(calicoManifestURL, calicoVersion)
+
+	// Delete Calico manifest
+	if err := deleteResourcesFromManifestURL(dynamicClient, config, calicoURL); err != nil {
+		return fmt.Errorf("failed to delete Calico manifest: %w", err)
+	}
+
+	// Wait a bit for resources to be deleted
+	fmt.Println("Waiting for Calico resources to be deleted...")
+	time.Sleep(5 * time.Second)
+
+	// Verify deletion
+	if isCalicoInstalled() {
+		fmt.Println("Warning: Some Calico resources may still be present")
+	} else {
+		fmt.Println("Calico CNI uninstalled ✓")
+	}
+
+	return nil
+}

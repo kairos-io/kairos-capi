@@ -22,7 +22,7 @@ const (
 
 func newInstallKubevirtCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "install-kubevirt",
+		Use:   "kubevirt",
 		Short: "Install KubeVirt",
 		Long:  "Install KubeVirt on the kind cluster (requires CDI to be installed first)",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -30,6 +30,34 @@ func newInstallKubevirtCmd() *cobra.Command {
 		},
 	}
 
+	return cmd
+}
+
+func newUninstallKubevirtCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "kubevirt",
+		Short: "Uninstall KubeVirt",
+		Long:  "Uninstall KubeVirt from the cluster",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return uninstallKubevirt()
+		},
+	}
+
+	return cmd
+}
+
+func newReinstallKubevirtCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "kubevirt",
+		Short: "Reinstall KubeVirt",
+		Long:  "Uninstall and reinstall KubeVirt",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := uninstallKubevirt(); err != nil {
+				return fmt.Errorf("failed to uninstall KubeVirt: %w", err)
+			}
+			return installKubevirt()
+		},
+	}
 	return cmd
 }
 
@@ -134,6 +162,41 @@ func installKubevirt() error {
 	}
 
 	fmt.Println("KubeVirt installed ✓")
+	return nil
+}
+
+func uninstallKubevirt() error {
+	// Check if KubeVirt is installed
+	if !isKubeVirtInstalled() {
+		fmt.Println("KubeVirt is not installed")
+		return nil
+	}
+
+	config, err := getKubeConfig()
+	if err != nil {
+		return err
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return fmt.Errorf("failed to create dynamic client: %w", err)
+	}
+
+	fmt.Println("Uninstalling KubeVirt...")
+
+	// Delete KubeVirt CR first
+	crURL := fmt.Sprintf(kubevirtCRURL, kubevirtVersion)
+	if err := deleteResourcesFromManifestURL(dynamicClient, config, crURL); err != nil {
+		fmt.Printf("Warning: failed to delete KubeVirt CR: %v\n", err)
+	}
+
+	// Delete KubeVirt operator
+	operatorURL := fmt.Sprintf(kubevirtOperatorURL, kubevirtVersion)
+	if err := deleteResourcesFromManifestURL(dynamicClient, config, operatorURL); err != nil {
+		return fmt.Errorf("failed to delete KubeVirt operator: %w", err)
+	}
+
+	fmt.Println("KubeVirt uninstalled ✓")
 	return nil
 }
 

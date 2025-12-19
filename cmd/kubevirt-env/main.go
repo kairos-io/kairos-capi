@@ -28,9 +28,9 @@ func main() {
 	viper.BindEnv("cluster-name", "CLUSTER_NAME")
 
 	rootCmd.AddCommand(newCreateTestClusterCmd())
-	rootCmd.AddCommand(newInstallCalicoCmd())
-	rootCmd.AddCommand(newInstallKubevirtCmd())
-	rootCmd.AddCommand(newInstallCapiCmd())
+	rootCmd.AddCommand(newInstallCmd())
+	rootCmd.AddCommand(newUninstallCmd())
+	rootCmd.AddCommand(newReinstallCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

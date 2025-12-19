@@ -21,7 +21,7 @@ const (
 
 func newInstallCapiCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "install-capi",
+		Use:   "capi",
 		Short: "Install Cluster API (CAPI)",
 		Long:  "Install Cluster API core components on the kind cluster",
 		PreRunE: func(cmd *cobra.Command, args []string) error {
@@ -32,6 +32,37 @@ func newInstallCapiCmd() *cobra.Command {
 		},
 	}
 
+	return cmd
+}
+
+func newUninstallCapiCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "capi",
+		Short: "Uninstall Cluster API",
+		Long:  "Uninstall Cluster API from the cluster",
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			return validateClusterctlInstalled()
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return uninstallCapi()
+		},
+	}
+
+	return cmd
+}
+
+func newReinstallCapiCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "capi",
+		Short: "Reinstall Cluster API",
+		Long:  "Uninstall and reinstall Cluster API",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := uninstallCapi(); err != nil {
+				return fmt.Errorf("failed to uninstall CAPI: %w", err)
+			}
+			return installCapi()
+		},
+	}
 	return cmd
 }
 
@@ -114,5 +145,39 @@ func installCapi() error {
 	}
 
 	fmt.Println("Cluster API (CAPI) installed ✓")
+	return nil
+}
+
+func uninstallCapi() error {
+	// Check if CAPI is installed
+	if !isCapiInstalled() {
+		fmt.Println("Cluster API (CAPI) is not installed")
+		return nil
+	}
+
+	fmt.Println("Uninstalling Cluster API...")
+
+	// Get bin directory
+	binDir := filepath.Join(".", "bin")
+	
+	// Set PATH to include bin directory
+	path := os.Getenv("PATH")
+	if path != "" {
+		path = binDir + string(filepath.ListSeparator) + path
+	} else {
+		path = binDir
+	}
+
+	// Run clusterctl delete --all
+	clusterctlCmd := exec.Command("clusterctl", "delete", "--all")
+	clusterctlCmd.Env = append(os.Environ(), "PATH="+path)
+	clusterctlCmd.Stdout = os.Stdout
+	clusterctlCmd.Stderr = os.Stderr
+	
+	if err := clusterctlCmd.Run(); err != nil {
+		return fmt.Errorf("failed to uninstall CAPI: %w", err)
+	}
+
+	fmt.Println("Cluster API (CAPI) uninstalled ✓")
 	return nil
 }
