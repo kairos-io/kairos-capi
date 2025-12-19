@@ -119,7 +119,6 @@ func installCapi() error {
 	}
 
 	// Run clusterctl init without infrastructure provider (just CAPI core)
-	// clusterctl init by itself installs CAPI core components
 	clusterctlCmd := exec.Command("clusterctl", "init")
 	clusterctlCmd.Env = append(os.Environ(), "PATH="+path)
 	clusterctlCmd.Stdout = os.Stdout

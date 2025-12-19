@@ -18,6 +18,7 @@ func newReinstallCmd() *cobra.Command {
 	cmd.AddCommand(newReinstallCdiCmd())
 	cmd.AddCommand(newReinstallKubevirtCmd())
 	cmd.AddCommand(newReinstallCapiCmd())
+	cmd.AddCommand(newReinstallCapkCmd())
 	cmd.AddCommand(newReinstallOsbuilderCmd())
 	cmd.AddCommand(newReinstallCertManagerCmd())
 	cmd.AddCommand(newReinstallKairosProviderCmd())
