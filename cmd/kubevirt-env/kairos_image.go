@@ -430,7 +430,7 @@ func downloadImageFromNginx(clientset kubernetes.Interface, buildDir string) err
 		return fmt.Errorf("failed to list services: %w", err)
 	}
 
-		var nginxService *corev1.Service
+	var nginxService *corev1.Service
 	for _, svc := range services.Items {
 		if svc.Spec.Type == corev1.ServiceTypeNodePort {
 			// Check if it's an nginx service

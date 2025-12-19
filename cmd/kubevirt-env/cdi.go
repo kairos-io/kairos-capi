@@ -181,7 +181,7 @@ func waitForCdiCRReady(ctx context.Context, dynamicClient dynamic.Interface) err
 		// Try cluster-scoped first (CDI CR is typically cluster-scoped)
 		var cdi *unstructured.Unstructured
 		var err error
-		
+
 		cdi, err = dynamicClient.Resource(cdiGVR).Get(checkCtx, "cdi", metav1.GetOptions{})
 		if err != nil {
 			// If cluster-scoped fails, try namespaced (some setups might use namespaced)
@@ -220,7 +220,7 @@ func waitForCdiCRReady(ctx context.Context, dynamicClient dynamic.Interface) err
 		// Try cluster-scoped first
 		var cdi *unstructured.Unstructured
 		var err error
-		
+
 		cdi, err = dynamicClient.Resource(cdiGVR).Get(checkCtx, "cdi", metav1.GetOptions{})
 		if err != nil {
 			// If cluster-scoped fails, try namespaced
