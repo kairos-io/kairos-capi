@@ -56,6 +56,11 @@ type KairosConfigReconciler struct {
 //+kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machines/status;clusters/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups="",resources=secrets;events,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+//+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=create;get;list;update;patch;watch
+//+kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get;list;watch
+//+kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=mutatingwebhookconfigurations;validatingwebhookconfigurations,verbs=get;list;patch;update
+//+kubebuilder:rbac:groups=batch,resources=jobs,verbs=create;get;list;watch
+//+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;patch;update
 
 // Reconcile is part of the main kubernetes reconciliation loop
 func (r *KairosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
