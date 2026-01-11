@@ -25,12 +25,14 @@ users:
   {{- range .UserGroups }}
     - {{ . }}
   {{- end }}
+  {{- if or .GitHubUser .SSHPublicKey }}
   ssh_authorized_keys:
   {{- if .GitHubUser }}
     - github:{{ .GitHubUser }}
   {{- end }}
   {{- if .SSHPublicKey }}
     - {{ .SSHPublicKey }}
+  {{- end }}
   {{- end }}
 
 {{- if eq .Role "control-plane" }}
