@@ -19,6 +19,7 @@ package bootstrap
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"strings"
 
@@ -181,6 +182,11 @@ func (r *KairosConfigReconciler) reconcileBootstrapData(ctx context.Context, log
 		return fmt.Errorf("failed to generate cloud-config: %w", err)
 	}
 
+	// Base64 encode the cloud-config for VMware infrastructure provider
+	// VMware expects cloud-init data to be base64 encoded when passed through guestinfo properties
+	// CAPV (Cluster API Provider vSphere) will use this encoded data directly
+	cloudConfigBase64 := base64.StdEncoding.EncodeToString([]byte(cloudConfig))
+
 	// Create Secret with bootstrap data
 	randomSuffix, err := randomString(6)
 	if err != nil {
@@ -206,7 +212,7 @@ func (r *KairosConfigReconciler) reconcileBootstrapData(ctx context.Context, log
 		},
 		Type: clusterv1.ClusterSecretType,
 		Data: map[string][]byte{
-			"value": []byte(cloudConfig),
+			"value": []byte(cloudConfigBase64),
 		},
 	}
 
