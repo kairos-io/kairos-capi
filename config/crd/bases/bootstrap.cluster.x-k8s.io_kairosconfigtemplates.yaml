@@ -149,6 +149,14 @@ spec:
                           GitHubUser is the GitHub username for SSH key access (e.g., "octocat")
                           If set, SSH keys will be fetched from GitHub
                         type: string
+                      hostnamePrefix:
+                        default: metal-
+                        description: |-
+                          HostnamePrefix is the prefix for the hostname that will be set on the node
+                          The final hostname will be: {HostnamePrefix}{{ trunc 4 .MachineID }}
+                          For example, if HostnamePrefix is "metal-", the hostname will be "metal-{4-char-machine-id}"
+                          Defaults to "metal-" if not specified
+                        type: string
                       kubernetesVersion:
                         description: KubernetesVersion specifies the Kubernetes version
                           to install

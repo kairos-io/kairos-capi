@@ -130,6 +130,14 @@ type KairosConfigSpec struct {
 	// Each manifest is placed at /var/lib/k0s/manifests/{Name}/{File}
 	// +optional
 	Manifests []Manifest `json:"manifests,omitempty"`
+
+	// HostnamePrefix is the prefix for the hostname that will be set on the node
+	// The final hostname will be: {HostnamePrefix}{{ trunc 4 .MachineID }}
+	// For example, if HostnamePrefix is "metal-", the hostname will be "metal-{4-char-machine-id}"
+	// Defaults to "metal-" if not specified
+	// +kubebuilder:default=metal-
+	// +optional
+	HostnamePrefix string `json:"hostnamePrefix,omitempty"`
 }
 
 // WorkerTokenSecretReference is a reference to a Secret containing a worker join token

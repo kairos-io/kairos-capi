@@ -376,6 +376,12 @@ func (r *KairosConfigReconciler) generateK0sCloudConfig(ctx context.Context, log
 		userGroups = []string{"admin"}
 	}
 
+	// Set hostname prefix (default to "metal-" if not specified)
+	hostnamePrefix := kairosConfig.Spec.HostnamePrefix
+	if hostnamePrefix == "" {
+		hostnamePrefix = "metal-"
+	}
+
 	// Build template data
 	templateData := bootstrap.TemplateData{
 		Role:           role,
@@ -387,7 +393,7 @@ func (r *KairosConfigReconciler) generateK0sCloudConfig(ctx context.Context, log
 		SSHPublicKey:   kairosConfig.Spec.SSHPublicKey,
 		WorkerToken:    workerToken,
 		Manifests:      kairosConfig.Spec.Manifests,
-		HostnamePrefix: "metal-",
+		HostnamePrefix: hostnamePrefix,
 	}
 
 	// Render template
