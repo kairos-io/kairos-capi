@@ -146,6 +146,20 @@ func (r *KairosControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	}
 
+	// Retrieve and store kubeconfig if control plane is ready
+	if kcp.Status.ReadyReplicas > 0 && kcp.Status.Initialized {
+		if err := r.reconcileKubeconfig(ctx, log, kcp, cluster); err != nil {
+			log.Error(err, "Failed to reconcile kubeconfig")
+			// Don't fail the reconcile, just log the error
+		}
+	}
+
+	// Update Cluster status
+	if err := r.updateClusterStatus(ctx, log, kcp, cluster); err != nil {
+		log.Error(err, "Failed to update cluster status")
+		// Don't fail the reconcile, just log the error
+	}
+
 	// Update conditions based on status
 	if kcp.Status.Initialized {
 		conditions.MarkTrue(kcp, clusterv1.ReadyCondition)
@@ -477,6 +491,136 @@ func (r *KairosControlPlaneReconciler) updateStatus(ctx context.Context, log log
 	}
 
 	return nil
+}
+
+// reconcileKubeconfig retrieves the kubeconfig from the control plane node and stores it in a secret
+func (r *KairosControlPlaneReconciler) reconcileKubeconfig(ctx context.Context, log logr.Logger, kcp *controlplanev1beta2.KairosControlPlane, cluster *clusterv1.Cluster) error {
+	// Check if kubeconfig secret already exists
+	secretName := fmt.Sprintf("%s-kubeconfig", cluster.Name)
+	secretKey := types.NamespacedName{
+		Name:      secretName,
+		Namespace: cluster.Namespace,
+	}
+
+	existingSecret := &corev1.Secret{}
+	if err := r.Get(ctx, secretKey, existingSecret); err == nil {
+		// Secret already exists, check if it's valid
+		if kubeconfig, ok := existingSecret.Data["value"]; ok && len(kubeconfig) > 0 {
+			log.V(4).Info("Kubeconfig secret already exists", "secret", secretName)
+			return nil
+		}
+	}
+
+	// Get the first ready control plane machine
+	machines, err := r.getControlPlaneMachines(ctx, kcp, cluster)
+	if err != nil {
+		return fmt.Errorf("failed to get control plane machines: %w", err)
+	}
+
+	var readyMachine *clusterv1.Machine
+	for _, machine := range machines {
+		if machine.Status.NodeRef != nil {
+			readyMachine = machine
+			break
+		}
+	}
+
+	if readyMachine == nil {
+		return fmt.Errorf("no ready control plane machine found")
+	}
+
+	// Retrieve kubeconfig from the node
+	// For k0s, the kubeconfig is at /var/lib/k0s/pki/admin.conf
+	// We'll use the infrastructure provider to get the node IP and SSH into it
+	kubeconfig, err := r.retrieveKubeconfigFromNode(ctx, log, readyMachine, cluster)
+	if err != nil {
+		return fmt.Errorf("failed to retrieve kubeconfig from node: %w", err)
+	}
+
+	// Create or update the kubeconfig secret
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: cluster.Namespace,
+			Labels: map[string]string{
+				clusterv1.ClusterNameLabel: cluster.Name,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: cluster.APIVersion,
+					Kind:       cluster.Kind,
+					Name:       cluster.Name,
+					UID:        cluster.UID,
+					Controller: func() *bool { b := true; return &b }(),
+				},
+			},
+		},
+		Type: clusterv1.ClusterSecretType,
+		Data: map[string][]byte{
+			"value": kubeconfig,
+		},
+	}
+
+	if err := r.Create(ctx, secret); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			// Update existing secret
+			if err := r.Update(ctx, secret); err != nil {
+				return fmt.Errorf("failed to update kubeconfig secret: %w", err)
+			}
+		} else {
+			return fmt.Errorf("failed to create kubeconfig secret: %w", err)
+		}
+	}
+
+	log.Info("Kubeconfig secret created/updated", "secret", secretName)
+	return nil
+}
+
+// retrieveKubeconfigFromNode retrieves the kubeconfig from a control plane node
+// This is a placeholder implementation - actual implementation depends on infrastructure provider
+func (r *KairosControlPlaneReconciler) retrieveKubeconfigFromNode(ctx context.Context, log logr.Logger, machine *clusterv1.Machine, cluster *clusterv1.Cluster) ([]byte, error) {
+	// TODO: Implement actual kubeconfig retrieval
+	// Options:
+	// 1. SSH into the node and read /var/lib/k0s/pki/admin.conf
+	// 2. Use k0s kubeconfig admin command via SSH
+	// 3. Use infrastructure provider's exec capability (e.g., VSphere guest operations)
+	// 4. Use a sidecar container or init container approach
+	
+	// For now, return an error indicating this needs to be implemented
+	// The actual implementation will depend on the infrastructure provider
+	return nil, fmt.Errorf("kubeconfig retrieval not yet implemented - requires infrastructure provider support for SSH/exec")
+}
+
+// updateClusterStatus updates the Cluster status based on control plane readiness
+func (r *KairosControlPlaneReconciler) updateClusterStatus(ctx context.Context, log logr.Logger, kcp *controlplanev1beta2.KairosControlPlane, cluster *clusterv1.Cluster) error {
+	// Check if kubeconfig secret exists
+	secretName := fmt.Sprintf("%s-kubeconfig", cluster.Name)
+	secretKey := types.NamespacedName{
+		Name:      secretName,
+		Namespace: cluster.Namespace,
+	}
+
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, secretKey, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			// Kubeconfig not ready yet - don't update cluster status, just return
+			// The cluster controller will handle status updates
+			return nil
+		}
+		return err
+	}
+
+	// Kubeconfig exists, mark control plane as initialized if control plane is ready
+	if kcp.Status.Initialized && kcp.Status.ReadyReplicas > 0 {
+		conditions.MarkTrue(cluster, clusterv1.ControlPlaneInitializedCondition)
+		conditions.MarkTrue(cluster, clusterv1.ControlPlaneReadyCondition)
+	} else {
+		// Use string literals for condition reasons if constants don't exist
+		conditions.MarkFalse(cluster, clusterv1.ControlPlaneInitializedCondition, "WaitingForControlPlaneInitialized", clusterv1.ConditionSeverityInfo, "Waiting for control plane to be initialized")
+		conditions.MarkFalse(cluster, clusterv1.ControlPlaneReadyCondition, "WaitingForControlPlaneReady", clusterv1.ConditionSeverityInfo, "Waiting for control plane to be ready")
+	}
+
+	return r.Status().Update(ctx, cluster)
 }
 
 func (r *KairosControlPlaneReconciler) reconcileDelete(ctx context.Context, log logr.Logger, kcp *controlplanev1beta2.KairosControlPlane) (ctrl.Result, error) {
