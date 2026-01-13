@@ -42,6 +42,7 @@ type TemplateData struct {
 	Manifests      []bootstrapv1beta2.Manifest
 	HostnamePrefix string
 	Install        *InstallConfig
+	ProviderID     string // ProviderID for the Node (e.g., "vsphere://<vm-uuid>")
 }
 
 // InstallConfig holds installation configuration for the template
@@ -76,6 +77,9 @@ func RenderK0sCloudConfig(data TemplateData) (string, error) {
 				}
 			}
 			return strings.Join(result, "\n")
+		},
+		"trimSuffix": func(suffix, s string) string {
+			return strings.TrimSuffix(s, suffix)
 		},
 	})
 

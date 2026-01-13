@@ -22,12 +22,15 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/util"
@@ -54,6 +57,8 @@ type KairosConfigReconciler struct {
 //+kubebuilder:rbac:groups=bootstrap.cluster.x-k8s.io,resources=kairosconfigs/finalizers,verbs=update
 //+kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machines;clusters,verbs=get;list;watch
 //+kubebuilder:rbac:groups=cluster.x-k8s.io,resources=machines/status;clusters/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=vspheremachines,verbs=get;list;watch
+//+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=vspheremachines/status,verbs=get
 //+kubebuilder:rbac:groups="",resources=secrets;events,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=create;get;list;update;patch;watch
@@ -126,7 +131,8 @@ func (r *KairosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	kairosConfig.Status.ObservedGeneration = kairosConfig.Generation
 
 	// Reconcile bootstrap data
-	if err := r.reconcileBootstrapData(ctx, log, kairosConfig, machine, cluster); err != nil {
+	result, err := r.reconcileBootstrapData(ctx, log, kairosConfig, machine, cluster)
+	if err != nil {
 		// Mark conditions as false on error
 		// Use "%s" as format string and pass error as argument to satisfy linter
 		conditions.MarkFalse(kairosConfig, clusterv1.ReadyCondition, bootstrapv1beta2.BootstrapDataSecretGenerationFailedReason, clusterv1.ConditionSeverityWarning, "%s", err.Error())
@@ -138,6 +144,11 @@ func (r *KairosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		kairosConfig.Status.Ready = false
 
 		return ctrl.Result{}, helper.Patch(ctx, kairosConfig)
+	}
+
+	// If reconcileBootstrapData requested a requeue (e.g., waiting for providerID), return it
+	if result.Requeue || result.RequeueAfter > 0 {
+		return result, helper.Patch(ctx, kairosConfig)
 	}
 
 	// Mark conditions as true on success
@@ -153,8 +164,61 @@ func (r *KairosConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	return ctrl.Result{}, helper.Patch(ctx, kairosConfig)
 }
 
-func (r *KairosConfigReconciler) reconcileBootstrapData(ctx context.Context, log logr.Logger, kairosConfig *bootstrapv1beta2.KairosConfig, machine *clusterv1.Machine, cluster *clusterv1.Cluster) error {
-	// If dataSecretName is already set, verify the secret exists
+func (r *KairosConfigReconciler) reconcileBootstrapData(ctx context.Context, log logr.Logger, kairosConfig *bootstrapv1beta2.KairosConfig, machine *clusterv1.Machine, cluster *clusterv1.Cluster) (ctrl.Result, error) {
+	// Get providerID - it may not be available initially (before VM is created)
+	// We allow bootstrap secret creation without providerID initially, then regenerate when providerID becomes available
+	currentProviderID := r.getProviderID(ctx, log, machine)
+
+	// For VSphere: Only wait for providerID if VSphereMachine is Ready (VM already provisioned)
+	// If VSphereMachine is not Ready yet, allow secret creation so VM can be provisioned
+	// This avoids circular dependency: VM needs bootstrap secret to be created, but providerID is set after VM creation
+	if machine != nil && machine.Spec.InfrastructureRef.Kind == "VSphereMachine" && currentProviderID == "" {
+		vsphereMachine := &unstructured.Unstructured{}
+		vsphereMachine.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "infrastructure.cluster.x-k8s.io",
+			Version: "v1beta1",
+			Kind:    "VSphereMachine",
+		})
+		vsphereMachineKey := types.NamespacedName{
+			Name:      machine.Spec.InfrastructureRef.Name,
+			Namespace: machine.Spec.InfrastructureRef.Namespace,
+		}
+
+		if err := r.Get(ctx, vsphereMachineKey, vsphereMachine); err == nil {
+			// Check if VSphereMachine is Ready (VM provisioned)
+			// Look for Ready condition in status.conditions array
+			conditions, found, _ := unstructured.NestedSlice(vsphereMachine.Object, "status", "conditions")
+			isReady := false
+			if found {
+				for _, cond := range conditions {
+					condMap, ok := cond.(map[string]interface{})
+					if ok {
+						condType, _ := condMap["type"].(string)
+						condStatus, _ := condMap["status"].(string)
+						if condType == "Ready" && condStatus == "True" {
+							isReady = true
+							break
+						}
+					}
+				}
+			}
+
+			// Only wait for providerID if VM is already Ready (provisioned)
+			// If VM is not Ready yet, proceed with secret creation (VM needs bootstrap secret to be created first)
+			if isReady {
+				log.V(4).Info("VSphereMachine is Ready but providerID not yet set, waiting briefly for CAPV to set it",
+					"machine", machine.Name,
+					"vsphereMachine", vsphereMachineKey.Name)
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			}
+			// If VM is not Ready yet, proceed with secret creation - this allows VM to be provisioned
+			log.V(5).Info("VSphereMachine not Ready yet, proceeding with bootstrap secret creation",
+				"machine", machine.Name,
+				"vsphereMachine", vsphereMachineKey.Name)
+		}
+	}
+
+	// If dataSecretName is already set, verify the secret exists and check if regeneration is needed
 	if kairosConfig.Status.DataSecretName != nil {
 		secret := &corev1.Secret{}
 		secretKey := types.NamespacedName{
@@ -167,36 +231,93 @@ func (r *KairosConfigReconciler) reconcileBootstrapData(ctx context.Context, log
 				log.Info("Bootstrap secret was deleted, regenerating", "secret", *kairosConfig.Status.DataSecretName)
 				kairosConfig.Status.DataSecretName = nil
 			} else {
-				return fmt.Errorf("failed to get bootstrap secret: %w", err)
+				return ctrl.Result{}, fmt.Errorf("failed to get bootstrap secret: %w", err)
 			}
 		} else {
-			// Secret exists, verify it's ready
-			log.Info("Bootstrap data already generated", "secret", *kairosConfig.Status.DataSecretName)
-			kairosConfig.Status.Ready = true
-			// Ensure initialization.dataSecretCreated is set
-			if kairosConfig.Status.Initialization == nil {
-				kairosConfig.Status.Initialization = &bootstrapv1beta2.KairosConfigInitialization{}
+			// Secret exists, check if we need to regenerate it due to providerID availability
+			needsRegeneration := false
+			currentProviderID := r.getProviderID(ctx, log, machine)
+
+			if currentProviderID != "" {
+				// Machine has providerID, check if the secret contains it
+				secretData, ok := secret.Data["value"]
+				if !ok {
+					log.Info("Bootstrap secret missing data, regenerating", "secret", *kairosConfig.Status.DataSecretName)
+					needsRegeneration = true
+				} else {
+					// Kubernetes secrets store data as base64-encoded strings
+					// Decode once to get the plain cloud-config YAML
+					decodedData, err := base64.StdEncoding.DecodeString(string(secretData))
+					if err != nil {
+						log.Info("Failed to decode bootstrap secret, regenerating", "secret", *kairosConfig.Status.DataSecretName, "error", err)
+						needsRegeneration = true
+					} else {
+						// Check if the decoded cloud-config contains the providerID in the systemd service script
+						cloudConfigStr := string(decodedData)
+						// Check if providerID is present in the script
+						hasProviderIDInSecret := strings.Contains(cloudConfigStr, currentProviderID)
+
+						// Check if there's a k0s post-bootstrap service (indicating providerID was included)
+						// If Machine has providerID but secret has no service, we need to regenerate
+						hasK0sPostBootstrapService := strings.Contains(cloudConfigStr, "kairos-k0s-post-bootstrap.service")
+
+						if currentProviderID != "" && (!hasProviderIDInSecret || !hasK0sPostBootstrapService) {
+							log.Info("Bootstrap secret missing providerID in k0s post-bootstrap service, regenerating to include it",
+								"secret", *kairosConfig.Status.DataSecretName,
+								"providerID", currentProviderID,
+								"hasProviderIDInSecret", hasProviderIDInSecret,
+								"hasK0sPostBootstrapService", hasK0sPostBootstrapService)
+							needsRegeneration = true
+						}
+					}
+				}
 			}
-			kairosConfig.Status.Initialization.DataSecretCreated = true
-			return nil
+
+			if needsRegeneration {
+				// Delete the old secret and clear dataSecretName to trigger regeneration
+				log.Info("Deleting old bootstrap secret for regeneration", "secret", *kairosConfig.Status.DataSecretName)
+				if err := r.Delete(ctx, secret); err != nil && !apierrors.IsNotFound(err) {
+					log.Error(err, "Failed to delete old bootstrap secret", "secret", *kairosConfig.Status.DataSecretName)
+					// Continue anyway - we'll try to create a new one
+				}
+				kairosConfig.Status.DataSecretName = nil
+				kairosConfig.Status.Ready = false
+				if kairosConfig.Status.Initialization != nil {
+					kairosConfig.Status.Initialization.DataSecretCreated = false
+				}
+			} else {
+				// Secret exists and is up-to-date, verify it's ready
+				log.V(4).Info("Bootstrap data already generated and up-to-date", "secret", *kairosConfig.Status.DataSecretName)
+				kairosConfig.Status.Ready = true
+				// Ensure initialization.dataSecretCreated is set
+				if kairosConfig.Status.Initialization == nil {
+					kairosConfig.Status.Initialization = &bootstrapv1beta2.KairosConfigInitialization{}
+				}
+				kairosConfig.Status.Initialization.DataSecretCreated = true
+				return ctrl.Result{}, nil
+			}
 		}
 	}
 
 	// Generate Kairos cloud-config
 	cloudConfig, err := r.generateCloudConfig(ctx, log, kairosConfig, machine, cluster)
 	if err != nil {
-		return fmt.Errorf("failed to generate cloud-config: %w", err)
+		return ctrl.Result{}, fmt.Errorf("failed to generate cloud-config: %w", err)
 	}
 
-	// Base64 encode the cloud-config for VMware infrastructure provider
-	// VMware expects cloud-init data to be base64 encoded when passed through guestinfo properties
-	// CAPV (Cluster API Provider vSphere) will use this encoded data directly
-	cloudConfigBase64 := base64.StdEncoding.EncodeToString([]byte(cloudConfig))
+	// Store the cloud-config as plain text in the secret
+	// Kubernetes will automatically base64 encode it when storing in etcd
+	// CAPV will read it, base64 decode it (removing Kubernetes encoding), and get plain text
+	// CAPV will then pass it to VMware guestinfo properties as userdata (and possibly vendordata)
+	// Note: There is a known issue where CAPV may set vendordata without setting guestinfo.vendordata.encoding,
+	// which causes Kairos to log "VMWare: Failed to get vendordata: Unknown encoding". However, userdata works
+	// correctly, so this error is non-blocking and the cluster will function properly.
+	// Do NOT base64 encode it ourselves - let CAPV handle the encoding
 
 	// Create Secret with bootstrap data
 	randomSuffix, err := randomString(6)
 	if err != nil {
-		return fmt.Errorf("failed to generate random string: %w", err)
+		return ctrl.Result{}, fmt.Errorf("failed to generate random string: %w", err)
 	}
 	secretName := fmt.Sprintf("%s-%s", kairosConfig.Name, randomSuffix)
 	secret := &corev1.Secret{
@@ -218,7 +339,7 @@ func (r *KairosConfigReconciler) reconcileBootstrapData(ctx context.Context, log
 		},
 		Type: clusterv1.ClusterSecretType,
 		Data: map[string][]byte{
-			"value": []byte(cloudConfigBase64),
+			"value": []byte(cloudConfig),
 		},
 	}
 
@@ -226,16 +347,46 @@ func (r *KairosConfigReconciler) reconcileBootstrapData(ctx context.Context, log
 		if apierrors.IsAlreadyExists(err) {
 			// Secret already exists, use it
 			if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: kairosConfig.Namespace}, secret); err != nil {
-				return err
+				return ctrl.Result{}, err
 			}
 		} else {
-			return err
+			return ctrl.Result{}, err
 		}
 	}
 
 	// Update status with dataSecretName
 	kairosConfig.Status.DataSecretName = &secretName
-	kairosConfig.Status.Ready = true
+
+	// Mark secret as Ready - providerID will be included if available, otherwise it will be regenerated later
+	// We allow the secret to be Ready even without providerID initially, so VM can be created
+	// When providerID becomes available (via VSphereMachine watch), the secret will be regenerated
+	if currentProviderID != "" {
+		// Verify providerID is included in the cloud-config
+		// cloudConfig is plain text, no need to decode
+		hasProviderIDInSecret := strings.Contains(cloudConfig, currentProviderID)
+		// Check for the systemd service that sets providerID (runs after k0s.service starts)
+		hasK0sPostBootstrapService := strings.Contains(cloudConfig, "kairos-k0s-post-bootstrap.service")
+
+		if hasProviderIDInSecret && hasK0sPostBootstrapService {
+			kairosConfig.Status.Ready = true
+			log.Info("Bootstrap data secret created with providerID", "secret", secretName, "providerID", currentProviderID)
+		} else {
+			// ProviderID should be included but wasn't - regenerate
+			log.Info("Bootstrap secret created but providerID not properly included, will regenerate",
+				"secret", secretName,
+				"providerID", currentProviderID,
+				"hasProviderID", hasProviderIDInSecret,
+				"hasK0sPostBootstrapService", hasK0sPostBootstrapService)
+			kairosConfig.Status.Ready = false
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+	} else {
+		// No providerID available yet - mark as Ready so VM can be created
+		// When providerID becomes available (via VSphereMachine watch), secret will be regenerated
+		kairosConfig.Status.Ready = true
+		log.Info("Bootstrap secret created without providerID (will be regenerated when providerID becomes available)",
+			"secret", secretName)
+	}
 
 	// Set initialization.dataSecretCreated as required by Cluster API contract
 	// This field is used by the Machine controller to determine when bootstrap data is ready
@@ -244,8 +395,7 @@ func (r *KairosConfigReconciler) reconcileBootstrapData(ctx context.Context, log
 	}
 	kairosConfig.Status.Initialization.DataSecretCreated = true
 
-	log.Info("Bootstrap data secret created", "secret", secretName)
-	return nil
+	return ctrl.Result{}, nil
 }
 
 func (r *KairosConfigReconciler) generateCloudConfig(ctx context.Context, log logr.Logger, kairosConfig *bootstrapv1beta2.KairosConfig, machine *clusterv1.Machine, cluster *clusterv1.Cluster) (string, error) {
@@ -402,6 +552,10 @@ func (r *KairosConfigReconciler) generateK0sCloudConfig(ctx context.Context, log
 		}
 	}
 
+	// Get providerID from Machine's infrastructure reference
+	// This is needed to set the Node's providerID so the Machine controller can match Nodes to Machines
+	providerID := r.getProviderID(ctx, log, machine)
+
 	// Build template data
 	templateData := bootstrap.TemplateData{
 		Role:           role,
@@ -415,6 +569,7 @@ func (r *KairosConfigReconciler) generateK0sCloudConfig(ctx context.Context, log
 		Manifests:      kairosConfig.Spec.Manifests,
 		HostnamePrefix: hostnamePrefix,
 		Install:        installConfig,
+		ProviderID:     providerID,
 	}
 
 	// Render template
@@ -448,11 +603,24 @@ func randomString(length int) (string, error) {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *KairosConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Create unstructured VSphereMachine object for watching
+	vsphereMachineGVK := schema.GroupVersionKind{
+		Group:   "infrastructure.cluster.x-k8s.io",
+		Version: "v1beta1",
+		Kind:    "VSphereMachine",
+	}
+	vsphereMachine := &unstructured.Unstructured{}
+	vsphereMachine.SetGroupVersionKind(vsphereMachineGVK)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bootstrapv1beta2.KairosConfig{}).
 		Watches(
 			&clusterv1.Machine{},
 			handler.EnqueueRequestsFromMapFunc(r.machineToKairosConfig),
+		).
+		Watches(
+			vsphereMachine,
+			handler.EnqueueRequestsFromMapFunc(r.vsphereMachineToKairosConfig),
 		).
 		Complete(r)
 }
@@ -485,4 +653,108 @@ func (r *KairosConfigReconciler) machineToKairosConfig(ctx context.Context, o cl
 			},
 		},
 	}
+}
+
+// vsphereMachineToKairosConfig maps a VSphereMachine to its KairosConfig
+// This allows us to watch for VSphereMachine changes (especially when providerID is set)
+// and trigger KairosConfig reconciliation to regenerate bootstrap secret with providerID
+func (r *KairosConfigReconciler) vsphereMachineToKairosConfig(ctx context.Context, o client.Object) []reconcile.Request {
+	// Verify this is an unstructured object (VSphereMachine)
+	if _, ok := o.(*unstructured.Unstructured); !ok {
+		return nil
+	}
+
+	// Get the Machine that owns this VSphereMachine
+	// VSphereMachine is typically owned by a Machine
+	machineList := &clusterv1.MachineList{}
+	if err := r.List(ctx, machineList, client.InNamespace(o.GetNamespace())); err != nil {
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for _, machine := range machineList.Items {
+		// Check if this Machine references the VSphereMachine
+		if machine.Spec.InfrastructureRef.Kind == "VSphereMachine" &&
+			machine.Spec.InfrastructureRef.Name == o.GetName() &&
+			machine.Spec.InfrastructureRef.Namespace == o.GetNamespace() {
+			// Check if Machine has a bootstrap config reference to KairosConfig
+			if machine.Spec.Bootstrap.ConfigRef != nil &&
+				machine.Spec.Bootstrap.ConfigRef.GroupVersionKind().Group == bootstrapv1beta2.GroupVersion.Group &&
+				machine.Spec.Bootstrap.ConfigRef.Kind == "KairosConfig" {
+				requests = append(requests, reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Name:      machine.Spec.Bootstrap.ConfigRef.Name,
+						Namespace: machine.Spec.Bootstrap.ConfigRef.Namespace,
+					},
+				})
+			}
+		}
+	}
+
+	return requests
+}
+
+// getProviderID retrieves the providerID from the Machine's infrastructure reference
+// This is used to configure k0s/kubelet to set the providerID on the Node
+// so the Machine controller can match Nodes to Machines
+func (r *KairosConfigReconciler) getProviderID(ctx context.Context, log logr.Logger, machine *clusterv1.Machine) string {
+	if machine == nil {
+		log.V(4).Info("Machine is nil, cannot get providerID")
+		return ""
+	}
+
+	// First, check if Machine already has providerID set
+	if machine.Spec.ProviderID != nil && *machine.Spec.ProviderID != "" {
+		log.Info("Using providerID from Machine spec", "providerID", *machine.Spec.ProviderID, "machine", machine.Name)
+		return *machine.Spec.ProviderID
+	}
+
+	// Try to get providerID from infrastructure reference (e.g., VSphereMachine)
+	if machine.Spec.InfrastructureRef.Kind == "" {
+		log.V(4).Info("Machine has no infrastructure reference, cannot get providerID", "machine", machine.Name)
+		return ""
+	}
+
+	// For VSphere, get providerID from VSphereMachine spec
+	if machine.Spec.InfrastructureRef.Kind == "VSphereMachine" {
+		vsphereMachine := &unstructured.Unstructured{}
+		vsphereMachine.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "infrastructure.cluster.x-k8s.io",
+			Version: "v1beta1",
+			Kind:    "VSphereMachine",
+		})
+		vsphereMachineKey := types.NamespacedName{
+			Name:      machine.Spec.InfrastructureRef.Name,
+			Namespace: machine.Spec.InfrastructureRef.Namespace,
+		}
+
+		if err := r.Get(ctx, vsphereMachineKey, vsphereMachine); err != nil {
+			log.V(4).Info("Failed to get VSphereMachine for providerID", "machine", machine.Name, "vsphereMachine", vsphereMachineKey.Name, "error", err)
+			return ""
+		}
+
+		// Try to get providerID from spec.providerID first (most reliable)
+		if providerID, found, err := unstructured.NestedString(vsphereMachine.Object, "spec", "providerID"); err == nil && found && providerID != "" {
+			log.V(4).Info("Found providerID in VSphereMachine spec", "providerID", providerID, "machine", machine.Name, "vsphereMachine", vsphereMachineKey.Name)
+			return providerID
+		}
+
+		// Try to get VM UUID from status and construct providerID
+		// This is set by CAPV after VM is provisioned
+		if vmUUID, found, err := unstructured.NestedString(vsphereMachine.Object, "status", "vmUUID"); err == nil && found && vmUUID != "" {
+			providerID := fmt.Sprintf("vsphere://%s", vmUUID)
+			log.V(4).Info("Constructed providerID from VSphereMachine VM UUID", "providerID", providerID, "vmUUID", vmUUID, "machine", machine.Name, "vsphereMachine", vsphereMachineKey.Name)
+			return providerID
+		}
+
+		// Check status.providerID as well (some CAPV versions set this)
+		if providerID, found, err := unstructured.NestedString(vsphereMachine.Object, "status", "providerID"); err == nil && found && providerID != "" {
+			log.V(4).Info("Found providerID in VSphereMachine status", "providerID", providerID, "machine", machine.Name, "vsphereMachine", vsphereMachineKey.Name)
+			return providerID
+		}
+
+		log.Info("VSphereMachine found but no providerID or vmUUID available yet", "machine", machine.Name, "vsphereMachine", vsphereMachineKey.Name)
+	}
+
+	return ""
 }

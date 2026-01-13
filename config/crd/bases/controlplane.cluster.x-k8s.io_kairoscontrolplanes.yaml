@@ -287,6 +287,8 @@ spec:
                   ReadyReplicas is the number of control plane machines that are ready
                   Contract: ControlPlane MUST expose readyReplicas
                   A machine is considered ready when it has a NodeRef and the Node is ready.
+                  Note: omitempty is removed to ensure the field is always present (even when 0),
+                  as the Cluster controller checks this field and null vs 0 can cause issues.
                 format: int32
                 type: integer
               replicas:

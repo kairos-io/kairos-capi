@@ -14,10 +14,13 @@ Template inputs (from Go):
   .Manifests         []Manifest // optional manifests
   .HostnamePrefix    string   // e.g. "metal-"
   .Install           *InstallConfig // install configuration (optional)
+  .ProviderID        string   // providerID for Node (e.g., "vsphere://<vm-uuid>")
 */ -}}
 
-{{/* Hostname: we want to preserve Kairos templating: metal-{{ trunc 4 .MachineID }} */}}
-hostname: {{ .HostnamePrefix }}{{"{{ trunc 4 .MachineID }}"}}
+{{/* Hostname: Use hostname prefix, trimming trailing dashes to avoid invalid hostnames */}}
+{{- if .HostnamePrefix }}
+hostname: {{ trimSuffix "-" .HostnamePrefix }}
+{{- end }}
 
 {{- if .Install }}
 install:
@@ -69,16 +72,118 @@ write_files:
 
 {{- end }}
 
-{{- if .Manifests }}
+{{- if or .Manifests .ProviderID }}
 
-# Optional extra manifests to be applied by k0s from /var/lib/k0s/manifests
-write_files:
-{{- range .Manifests }}
-  - path: /var/lib/k0s/manifests/{{ .Name }}/{{ .File }}
-    permissions: "0644"
-    content: |
-{{ .Content | indent 6 }}
+# Create systemd service that runs after k0s.service starts
+# Files are created during initramfs stage (written to /sysroot, available after switch_root)
+# A helper service enables the main service early in boot
+stages:
+  initramfs:
+    - name: "Create k0s post-bootstrap service and script"
+      files:
+        - path: /etc/systemd/system/kairos-k0s-post-bootstrap.service
+          permissions: "0644"
+          owner: 0
+          group: 0
+          content: |
+            [Unit]
+            Description=Kairos k0s post-bootstrap tasks
+            {{- if eq .Role "control-plane" }}
+            After=k0s.service
+            Wants=k0s.service
+            {{- else }}
+            After=k0s-worker.service
+            Wants=k0s-worker.service
+            {{- end }}
+            
+            [Service]
+            Type=oneshot
+            RemainAfterExit=yes
+            ExecStart=/usr/local/bin/kairos-k0s-post-bootstrap.sh
+            
+            [Install]
+            WantedBy=multi-user.target
+        - path: /etc/systemd/system/kairos-k0s-post-bootstrap-enable.service
+          permissions: "0644"
+          owner: 0
+          group: 0
+          content: |
+            [Unit]
+            Description=Enable kairos-k0s-post-bootstrap service
+            After=systemd-udev-settle.service
+            Before=multi-user.target
+            
+            [Service]
+            Type=oneshot
+            RemainAfterExit=yes
+            ExecStart=/bin/systemctl daemon-reload
+            ExecStart=/bin/systemctl enable kairos-k0s-post-bootstrap.service
+            
+            [Install]
+            WantedBy=multi-user.target
+        - path: /usr/local/bin/kairos-k0s-post-bootstrap.sh
+          permissions: "0755"
+          owner: 0
+          group: 0
+          content: |
+            #!/bin/bash
+            set -e
+            
+            {{- if .Manifests }}
+            # Write k0s manifests
+            echo "Writing k0s manifests..."
+            mkdir -p /var/lib/k0s/manifests
+            {{- range .Manifests }}
+            mkdir -p /var/lib/k0s/manifests/{{ .Name }}
+            cat > /var/lib/k0s/manifests/{{ .Name }}/{{ .File }} << 'MANIFEST_EOF'
+{{ .Content }}
+MANIFEST_EOF
+            chmod 0644 /var/lib/k0s/manifests/{{ .Name }}/{{ .File }}
+            echo "Written manifest: /var/lib/k0s/manifests/{{ .Name }}/{{ .File }}"
+            {{- end }}
+            {{- end }}
+            
+            {{- if .ProviderID }}
+            # Wait for k0s to be ready and Node to be registered
+            echo "Waiting for k0s node to be registered..."
+            MAX_WAIT=300
+            ELAPSED=0
+            while ! kubectl get node $(hostname) &>/dev/null; do
+              if [ $ELAPSED -ge $MAX_WAIT ]; then
+                echo "ERROR: Timeout waiting for node to be registered"
+                exit 1
+              fi
+              echo "Waiting for node to be registered... (${ELAPSED}s/${MAX_WAIT}s)"
+              sleep 5
+              ELAPSED=$((ELAPSED + 5))
+            done
+            
+            # Set providerID on the Node
+            # Retry in case of temporary API server unavailability
+            echo "Setting providerID={{ .ProviderID }} on node $(hostname)..."
+            PROVIDER_ID_SET=false
+            for i in {1..30}; do
+              if kubectl patch node $(hostname) --type=merge -p '{"spec":{"providerID":"{{ .ProviderID }}"}}' &>/dev/null; then
+                echo "Successfully set providerID={{ .ProviderID }} on node $(hostname)"
+                PROVIDER_ID_SET=true
+                break
+              fi
+              echo "Attempt $i/30: Failed to set providerID, retrying in 5 seconds..."
+              sleep 5
+            done
+            
+            if [ "$PROVIDER_ID_SET" != "true" ]; then
+              echo "ERROR: Failed to set providerID after 30 attempts"
+              exit 1
+            fi
+            {{- else }}
+            echo "No providerID to set"
+            {{- end }}
+            
+            echo "k0s post-bootstrap tasks completed successfully"
+      commands:
+        # Create symlink to enable the helper service that enables the main service
+        - mkdir -p /etc/systemd/system/multi-user.target.wants
+        - ln -sf /etc/systemd/system/kairos-k0s-post-bootstrap-enable.service /etc/systemd/system/multi-user.target.wants/kairos-k0s-post-bootstrap-enable.service || true
+
 {{- end }}
-
-{{- end }}
-

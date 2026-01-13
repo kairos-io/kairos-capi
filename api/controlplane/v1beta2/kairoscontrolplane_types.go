@@ -120,8 +120,10 @@ type KairosControlPlaneStatus struct {
 	// ReadyReplicas is the number of control plane machines that are ready
 	// Contract: ControlPlane MUST expose readyReplicas
 	// A machine is considered ready when it has a NodeRef and the Node is ready.
+	// Note: omitempty is removed to ensure the field is always present (even when 0),
+	// as the Cluster controller checks this field and null vs 0 can cause issues.
 	// +optional
-	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
+	ReadyReplicas int32 `json:"readyReplicas"`
 
 	// Replicas is the total number of control plane machines
 	// This includes machines in all states (pending, running, failed, etc.)

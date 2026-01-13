@@ -37,7 +37,6 @@ import (
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/conditions"
-	"sigs.k8s.io/cluster-api/util/patch"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -130,12 +129,6 @@ func (r *KairosControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, nil
 	}
 
-	// Initialize patch helper
-	helper, err := patch.NewHelper(kcp, r.Client)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
 	// Always update observedGeneration
 	kcp.Status.ObservedGeneration = kcp.Generation
 
@@ -146,8 +139,15 @@ func (r *KairosControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.R
 		conditions.MarkFalse(kcp, controlplanev1beta2.AvailableCondition, controlplanev1beta2.ControlPlaneInitializationFailedReason, clusterv1.ConditionSeverityWarning, "%s", err.Error())
 		kcp.Status.FailureReason = controlplanev1beta2.ControlPlaneInitializationFailedReason
 		kcp.Status.FailureMessage = err.Error()
-		return ctrl.Result{}, helper.Patch(ctx, kcp)
+		// Use Status().Update() to ensure all status fields are included
+		if updateErr := r.Status().Update(ctx, kcp); updateErr != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update KCP status: %w", updateErr)
+		}
+		return ctrl.Result{}, nil
 	}
+
+	// Track previous initialized state to detect transitions
+	wasInitialized := kcp.Status.Initialized
 
 	// Update status
 	if err := r.updateStatus(ctx, log, kcp, cluster); err != nil {
@@ -256,7 +256,16 @@ func (r *KairosControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.R
 				if err := r.updateStatus(ctx, log, kcp, cluster); err != nil {
 					log.Error(err, "Failed to update status before requeue")
 				}
-				return ctrl.Result{RequeueAfter: retryDelay}, helper.Patch(ctx, kcp)
+				// Use Status().Update() to ensure all status fields are included
+				if updateErr := r.Status().Update(ctx, kcp); updateErr != nil {
+					if apierrors.IsConflict(updateErr) {
+						log.V(4).Info("Conflict updating KCP status before requeue, will retry", "error", updateErr)
+						return ctrl.Result{Requeue: true}, nil
+					}
+					log.Error(updateErr, "Failed to update KCP status before requeue")
+					return ctrl.Result{RequeueAfter: retryDelay}, nil
+				}
+				return ctrl.Result{RequeueAfter: retryDelay}, nil
 			} else {
 				log.Error(err, "Failed to reconcile kubeconfig (non-transient error)",
 					"readyReplicas", kcp.Status.ReadyReplicas,
@@ -292,7 +301,39 @@ func (r *KairosControlPlaneReconciler) Reconcile(ctx context.Context, req ctrl.R
 		kcp.Status.FailureMessage = ""
 	}
 
-	return ctrl.Result{}, helper.Patch(ctx, kcp)
+	// Use Status().Update() instead of Patch() to ensure all status fields are included
+	// This is important because Patch() with omitempty tags may omit zero values,
+	// causing fields like ReadyReplicas to appear as null instead of 0
+	// Status().Update() sends the complete status object, ensuring all fields are present
+	if err := r.Status().Update(ctx, kcp); err != nil {
+		if apierrors.IsConflict(err) {
+			// Conflict means the object was modified, requeue to retry
+			log.V(4).Info("Conflict updating KCP status, will requeue", "error", err)
+			return ctrl.Result{Requeue: true}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("failed to update KCP status: %w", err)
+	}
+
+	log.Info("Successfully updated KCP status",
+		"initialized", kcp.Status.Initialized,
+		"readyReplicas", kcp.Status.ReadyReplicas,
+		"replicas", kcp.Status.Replicas,
+		"updatedReplicas", kcp.Status.UpdatedReplicas,
+		"unavailableReplicas", kcp.Status.UnavailableReplicas,
+		"observedGeneration", kcp.Status.ObservedGeneration)
+
+	// Trigger Cluster reconciliation when status.Initialized transitions from false to true
+	// This ensures the Cluster controller promptly sets ControlPlaneInitialized condition
+	// We do this AFTER persisting the KCP status to ensure the Cluster controller sees the updated status
+	if !wasInitialized && kcp.Status.Initialized {
+		log.Info("Control plane initialized state changed, triggering Cluster reconciliation", "cluster", cluster.Name)
+		if err := r.triggerClusterReconciliation(ctx, log, cluster); err != nil {
+			log.V(4).Info("Failed to trigger Cluster reconciliation", "error", err)
+			// Don't fail the reconcile, just log - Cluster controller will eventually reconcile
+		}
+	}
+
+	return ctrl.Result{}, nil
 }
 
 // findClusterForControlPlane searches for a Cluster that references this KairosControlPlane
@@ -576,7 +617,7 @@ func (r *KairosControlPlaneReconciler) updateStatus(ctx context.Context, log log
 	unavailableReplicas := int32(0)
 
 	for _, machine := range machines {
-		// Check if machine is ready
+		// Check if machine is ready (has NodeRef)
 		if machine.Status.NodeRef != nil {
 			readyReplicas++
 		}
@@ -592,14 +633,52 @@ func (r *KairosControlPlaneReconciler) updateStatus(ctx context.Context, log log
 		}
 	}
 
+	// ReadyReplicas should only be counted when NodeRef is actually set
+	// This ensures the Cluster controller can properly evaluate control plane readiness
+	// We do NOT artificially count machines as ready replicas without NodeRef, as this
+	// creates reconcile loops and confuses the Cluster controller
+
+	// Always set ReadyReplicas, even when it's 0, to ensure it's not null in the API
+	// The Cluster controller checks this field, and null vs 0 can cause issues
 	kcp.Status.ReadyReplicas = readyReplicas
 	kcp.Status.UpdatedReplicas = updatedReplicas
 	kcp.Status.UnavailableReplicas = unavailableReplicas
 
-	// Mark as initialized if we have at least one ready replica
+	// Log status field updates for debugging
+	log.Info("Updated control plane status fields",
+		"readyReplicas", readyReplicas,
+		"updatedReplicas", updatedReplicas,
+		"unavailableReplicas", unavailableReplicas,
+		"replicas", kcp.Status.Replicas)
+
+	// Mark as initialized if we have at least one ready replica (NodeRef set)
+	// OR if kubeconfig exists (control plane is functional even without NodeRef)
+	// The Cluster controller checks status.Initialized to set ControlPlaneInitialized condition
+	// Note: We set Initialized=true when kubeconfig exists to allow the Machine controller
+	// to connect and set NodeRef, even if ReadyReplicas is still 0
 	if readyReplicas > 0 && !kcp.Status.Initialized {
 		kcp.Status.Initialized = true
-		log.Info("Control plane initialized")
+		log.Info("Control plane initialized (NodeRef set)", "readyReplicas", readyReplicas)
+	} else if readyReplicas == 0 && !kcp.Status.Initialized {
+		// Check if kubeconfig exists - if so, mark as initialized even without NodeRef
+		// This allows the Machine controller to connect and set NodeRef
+		secretName := fmt.Sprintf("%s-kubeconfig", cluster.Name)
+		secretKey := types.NamespacedName{
+			Name:      secretName,
+			Namespace: cluster.Namespace,
+		}
+		secret := &corev1.Secret{}
+		if err := r.Get(ctx, secretKey, secret); err == nil {
+			if kubeconfig, ok := secret.Data["value"]; ok && len(kubeconfig) > 0 {
+				kcp.Status.Initialized = true
+				log.Info("Control plane initialized (kubeconfig exists, NodeRef pending)", "readyReplicas", readyReplicas)
+			}
+		}
+	} else if kcp.Status.Initialized && readyReplicas > 0 {
+		// Ensure Initialized stays true when we have ready replicas
+		// This handles the case where Initialized was set early (via kubeconfig)
+		// and now we have NodeRef set
+		log.V(4).Info("Control plane already initialized, readyReplicas confirmed", "readyReplicas", readyReplicas)
 	}
 
 	return nil
@@ -1047,88 +1126,173 @@ func (r *KairosControlPlaneReconciler) updateClusterStatus(ctx context.Context, 
 		if apierrors.IsNotFound(err) {
 			// Kubeconfig not ready yet - don't update cluster status, just return
 			// The cluster controller will handle status updates
+			log.V(4).Info("Kubeconfig secret not found, skipping cluster status update", "secret", secretName)
 			return nil
 		}
 		return err
 	}
 
+	log.Info("updateClusterStatus called", "cluster", cluster.Name, "kubeconfigExists", true)
+
+	// Re-fetch the cluster to ensure we have the latest version before updating
+	// This prevents conflicts with other controllers that might be updating the cluster
+	clusterKey := types.NamespacedName{
+		Name:      cluster.Name,
+		Namespace: cluster.Namespace,
+	}
+	clusterToPatch := &clusterv1.Cluster{}
+	if err := r.Get(ctx, clusterKey, clusterToPatch); err != nil {
+		return fmt.Errorf("failed to re-fetch cluster for updating: %w", err)
+	}
+
 	// Set controlPlaneEndpoint if not already set
 	// This is required for the Machine controller to connect to the workload cluster
-	machines, err := r.getControlPlaneMachines(ctx, kcp, cluster)
-	if err == nil && len(machines) > 0 {
+	// Track if we need to update the spec
+	needsSpecUpdate := false
+	currentHost := clusterToPatch.Spec.ControlPlaneEndpoint.Host
+	currentPort := clusterToPatch.Spec.ControlPlaneEndpoint.Port
+	log.V(4).Info("Checking controlPlaneEndpoint", "cluster", clusterToPatch.Name, "currentHost", currentHost, "currentPort", currentPort)
+
+	machines, err := r.getControlPlaneMachines(ctx, kcp, clusterToPatch)
+	if err != nil {
+		log.V(4).Info("Failed to get machines", "error", err)
+	} else if len(machines) == 0 {
+		log.V(4).Info("No machines found")
+	} else {
+		log.V(4).Info("Found machines", "count", len(machines))
 		// Find the first machine with an IP address
+		// Try machine.Status.Addresses first, then fallback to VSphereMachine/VSphereVM
 		for _, machine := range machines {
+			log.V(4).Info("Checking machine", "machine", machine.Name, "addressCount", len(machine.Status.Addresses))
+			var controlPlaneAddress string
+
+			// First, try machine.Status.Addresses (if populated)
 			if len(machine.Status.Addresses) > 0 {
 				var controlPlaneIP string
+				var controlPlaneHostname string
 				for _, addr := range machine.Status.Addresses {
+					log.V(4).Info("Machine address", "machine", machine.Name, "type", addr.Type, "address", addr.Address)
 					if addr.Type == clusterv1.MachineExternalIP || addr.Type == clusterv1.MachineInternalIP {
 						controlPlaneIP = addr.Address
-						break
+					}
+					if addr.Type == clusterv1.MachineInternalDNS {
+						controlPlaneHostname = addr.Address
 					}
 				}
-				if controlPlaneIP != "" && (cluster.Spec.ControlPlaneEndpoint.Host == "" || cluster.Spec.ControlPlaneEndpoint.Port == 0) {
-					// Set controlPlaneEndpoint if not already set
-					cluster.Spec.ControlPlaneEndpoint.Host = controlPlaneIP
-					cluster.Spec.ControlPlaneEndpoint.Port = 6443 // Default k0s API server port
-					log.Info("Setting controlPlaneEndpoint", "cluster", cluster.Name, "host", controlPlaneIP, "port", 6443)
+				// Prefer IP address, fallback to hostname
+				controlPlaneAddress = controlPlaneIP
+				if controlPlaneAddress == "" && controlPlaneHostname != "" {
+					controlPlaneAddress = controlPlaneHostname
+					log.V(4).Info("Using hostname from machine status", "hostname", controlPlaneHostname)
 				}
+			}
+
+			// Fallback: Get IP from VSphereMachine/VSphereVM (same method used for kubeconfig)
+			if controlPlaneAddress == "" {
+				log.V(4).Info("Machine.Status.Addresses empty, trying VSphereMachine/VSphereVM", "machine", machine.Name)
+				if ip, err := r.getNodeIP(ctx, log, machine); err == nil && ip != "" {
+					controlPlaneAddress = ip
+					log.V(4).Info("Found IP from VSphereMachine/VSphereVM", "machine", machine.Name, "ip", ip)
+				} else if err != nil {
+					log.V(4).Info("Failed to get IP from VSphereMachine/VSphereVM", "machine", machine.Name, "error", err)
+				}
+			}
+
+			if controlPlaneAddress != "" && (currentHost == "" || currentPort == 0) {
+				// Set controlPlaneEndpoint if not already set
+				clusterToPatch.Spec.ControlPlaneEndpoint.Host = controlPlaneAddress
+				clusterToPatch.Spec.ControlPlaneEndpoint.Port = 6443 // Default k0s API server port
+				needsSpecUpdate = true
+				log.Info("Setting controlPlaneEndpoint", "cluster", clusterToPatch.Name, "host", controlPlaneAddress, "port", 6443)
 				break
+			} else if controlPlaneAddress == "" {
+				log.V(4).Info("No IP or hostname found for machine", "machine", machine.Name)
+			} else {
+				log.V(4).Info("controlPlaneEndpoint already set", "currentHost", currentHost, "currentPort", currentPort)
 			}
 		}
 	}
 
-	// Kubeconfig exists - mark control plane as initialized
-	// Having kubeconfig means the control plane is initialized, even if NodeRef isn't set yet
-	// NodeRef will be set when the Machine controller connects to the workload cluster
-	if !conditions.IsTrue(cluster, clusterv1.ControlPlaneInitializedCondition) {
-		log.Info("Kubeconfig exists, marking control plane as initialized", "cluster", cluster.Name)
-		conditions.MarkTrue(cluster, clusterv1.ControlPlaneInitializedCondition)
-	}
+	// The Cluster API Cluster controller manages the ControlPlaneInitialized condition
+	// based on the control plane's status.Initialized field.
+	// We should NOT try to set this condition directly, as it causes reconcile loops
+	// and conflicts with the Cluster controller's logic.
+	// Instead, we ensure status.Initialized is set correctly on the KCP resource,
+	// and let the Cluster controller manage the condition on the Cluster resource.
 
-	// Mark as ready if we have at least one infrastructure-ready machine
-	// NodeRef may not be set yet, but if infrastructure is ready and kubeconfig exists,
-	// the control plane is functional
-	if err == nil && len(machines) > 0 {
-		hasReadyMachine := false
-		for _, machine := range machines {
-			if machine.Status.NodeRef != nil {
-				hasReadyMachine = true
-				break
+	// Update spec first if needed (controlPlaneEndpoint)
+	if needsSpecUpdate {
+		log.Info("Updating cluster spec with controlPlaneEndpoint", "cluster", clusterToPatch.Name, "host", clusterToPatch.Spec.ControlPlaneEndpoint.Host, "port", clusterToPatch.Spec.ControlPlaneEndpoint.Port)
+		// Use Update() for spec changes
+		if err := r.Update(ctx, clusterToPatch); err != nil {
+			if apierrors.IsConflict(err) {
+				log.V(4).Info("Conflict updating cluster spec, will retry on next reconcile", "cluster", clusterToPatch.Name, "error", err)
+				return nil // Will retry on next reconcile
 			}
-			// Also check infrastructure readiness as fallback
-			if conditions.IsTrue(machine, clusterv1.InfrastructureReadyCondition) &&
-				conditions.IsTrue(machine, clusterv1.BootstrapReadyCondition) {
-				hasReadyMachine = true
-				break
-			}
+			return fmt.Errorf("failed to update cluster spec: %w", err)
 		}
-		if hasReadyMachine {
-			if !conditions.IsTrue(cluster, clusterv1.ControlPlaneReadyCondition) {
-				log.Info("Control plane machines are ready, marking control plane as ready", "cluster", cluster.Name)
-				conditions.MarkTrue(cluster, clusterv1.ControlPlaneReadyCondition)
-			}
-		} else {
-			const waitingForReadyReason = "WaitingForControlPlaneReady"
-			const waitingForReadyMsg = "Waiting for control plane machines to be ready"
-			if conditions.IsTrue(cluster, clusterv1.ControlPlaneReadyCondition) {
-				conditions.MarkFalse(cluster, clusterv1.ControlPlaneReadyCondition, waitingForReadyReason, clusterv1.ConditionSeverityInfo, waitingForReadyMsg)
-			}
-		}
-	} else {
-		const waitingForReadyReason = "WaitingForControlPlaneReady"
-		const waitingForReadyMsg = "Waiting for control plane machines"
-		if conditions.IsTrue(cluster, clusterv1.ControlPlaneReadyCondition) {
-			conditions.MarkFalse(cluster, clusterv1.ControlPlaneReadyCondition, waitingForReadyReason, clusterv1.ConditionSeverityInfo, waitingForReadyMsg)
+		log.Info("Successfully updated cluster spec with controlPlaneEndpoint", "cluster", clusterToPatch.Name)
+		// Re-fetch after spec update to ensure we have latest version
+		if err := r.Get(ctx, client.ObjectKeyFromObject(clusterToPatch), clusterToPatch); err != nil {
+			return fmt.Errorf("failed to re-fetch cluster after spec update: %w", err)
 		}
 	}
 
-	// Use Patch helper to avoid race conditions
-	helper, err := patch.NewHelper(cluster, r.Client)
-	if err != nil {
-		return fmt.Errorf("failed to create patch helper: %w", err)
+	// Note: We do NOT update Cluster status conditions here.
+	// The Cluster controller manages ControlPlaneInitialized and ControlPlaneReady conditions
+	// based on the control plane's status.Initialized and ReadyReplicas fields.
+	// Attempting to set these conditions directly causes reconcile loops and conflicts.
+
+	return nil
+}
+
+// triggerClusterReconciliation updates a Cluster annotation to trigger Cluster controller reconciliation
+// This is needed because the Cluster controller watches Cluster resources, not ControlPlane resources directly.
+// When KCP status.Initialized changes, we update the Cluster annotation to ensure the Cluster controller
+// reconciles promptly and sets the ControlPlaneInitialized condition.
+func (r *KairosControlPlaneReconciler) triggerClusterReconciliation(ctx context.Context, log logr.Logger, cluster *clusterv1.Cluster) error {
+	if cluster == nil {
+		return fmt.Errorf("cluster is nil")
 	}
 
-	return helper.Patch(ctx, cluster)
+	// Re-fetch the cluster to ensure we have the latest version
+	clusterKey := types.NamespacedName{
+		Name:      cluster.Name,
+		Namespace: cluster.Namespace,
+	}
+	clusterToUpdate := &clusterv1.Cluster{}
+	if err := r.Get(ctx, clusterKey, clusterToUpdate); err != nil {
+		return fmt.Errorf("failed to re-fetch cluster: %w", err)
+	}
+
+	// Update annotation with current timestamp to trigger reconciliation
+	// The Cluster controller watches Cluster resources, so any change triggers reconciliation
+	annotationKey := "controlplane.cluster.x-k8s.io/status-initialized-timestamp"
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+
+	// Only update if annotation doesn't exist or has changed
+	// This prevents unnecessary updates and potential reconcile loops
+	if clusterToUpdate.Annotations == nil {
+		clusterToUpdate.Annotations = make(map[string]string)
+	}
+	currentTimestamp := clusterToUpdate.Annotations[annotationKey]
+	if currentTimestamp == timestamp {
+		// Already set to current timestamp, no need to update
+		return nil
+	}
+
+	clusterToUpdate.Annotations[annotationKey] = timestamp
+	if err := r.Update(ctx, clusterToUpdate); err != nil {
+		if apierrors.IsConflict(err) {
+			// Conflict is fine - Cluster controller is reconciling, which is what we want
+			log.V(4).Info("Conflict updating Cluster annotation (expected), Cluster controller is reconciling", "cluster", cluster.Name)
+			return nil
+		}
+		return fmt.Errorf("failed to update Cluster annotation: %w", err)
+	}
+
+	log.V(4).Info("Triggered Cluster reconciliation via annotation", "cluster", cluster.Name, "annotation", annotationKey)
+	return nil
 }
 
 func (r *KairosControlPlaneReconciler) reconcileDelete(ctx context.Context, log logr.Logger, kcp *controlplanev1beta2.KairosControlPlane) (ctrl.Result, error) {
