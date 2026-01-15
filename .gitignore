@@ -38,4 +38,7 @@ dist/
 *.tmp
 *.log
 
+# Local KubeVirt env artifacts
+.work-kubevirt-*
+
 ideas/*
