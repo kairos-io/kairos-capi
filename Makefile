@@ -118,7 +118,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 
 .PHONY: docker-build
 docker-build: generate fmt vet ## Build docker image with the manager.
-	docker build --no-cache -t ${IMG} .
+	docker build -t ${IMG} .
 	@echo "Built image: ${IMG}"
 
 .PHONY: docker-buildx
