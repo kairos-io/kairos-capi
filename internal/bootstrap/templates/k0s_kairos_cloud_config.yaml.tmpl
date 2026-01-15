@@ -73,8 +73,6 @@ write_files:
 
 {{- end }}
 
-{{- if or .Manifests .ProviderID }}
-
 # Create systemd service that runs after k0s.service starts
 # Files are created during initramfs stage (written to /sysroot, available after switch_root)
 # A helper service enables the main service early in boot
@@ -182,10 +180,14 @@ MANIFEST_EOF
             echo "No providerID to set"
             {{- end }}
             
+            # Mark bootstrap success for CAPI/CAPK consumers
+            # This file is used by Cluster API to determine bootstrap completion
+            mkdir -p /run/cluster-api
+            echo "success" > /run/cluster-api/bootstrap-success.complete
+            chmod 0644 /run/cluster-api/bootstrap-success.complete
+            
             echo "k0s post-bootstrap tasks completed successfully"
       commands:
         # Create symlink to enable the helper service that enables the main service
         - mkdir -p /sysroot/etc/systemd/system/multi-user.target.wants
         - ln -sf /sysroot/etc/systemd/system/kairos-k0s-post-bootstrap-enable.service /sysroot/etc/systemd/system/multi-user.target.wants/kairos-k0s-post-bootstrap-enable.service || true
-
-{{- end }}

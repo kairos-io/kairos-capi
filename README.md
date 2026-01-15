@@ -20,6 +20,12 @@ This project provides two Cluster API (CAPI) providers for managing Kubernetes c
 
 **Early Development** - MVP implementation in progress
 
+## Quickstarts
+
+- `docs/QUICKSTART_CAPD.md`
+- `docs/QUICKSTART_CAPV.md`
+- `docs/QUICKSTART_CAPK.md`
+
 ## License
 
 Apache-2.0

@@ -90,6 +90,10 @@ test-envtest: ## Run envtest-based integration tests.
 	eval $$(setup-envtest use -p env latest) && \
 	go test ./test/envtest/... -v -timeout 120s
 
+.PHONY: test-kubevirt
+test-kubevirt: ## Run local KubeVirt e2e flow (requires kind and KubeVirt).
+	./hack/kubevirt-e2e.sh
+
 .PHONY: clean-envtest
 clean-envtest: ## Clean envtest artifacts.
 	rm -rf test/crd/capi
@@ -111,6 +115,10 @@ verify-manifests: manifests ## Verify that manifests are up to date.
 .PHONY: build
 build: generate fmt vet ## Build manager binary.
 	go build -o bin/manager main.go
+
+.PHONY: kubevirt-env
+kubevirt-env: ## Build kubevirt-env helper CLI.
+	go build -o bin/kubevirt-env ./cmd/kubevirt-env
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.

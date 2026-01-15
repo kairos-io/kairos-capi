@@ -768,5 +768,29 @@ func (r *KairosConfigReconciler) getProviderID(ctx context.Context, log logr.Log
 		log.Info("VSphereMachine found but no providerID or vmUUID available yet", "machine", machine.Name, "vsphereMachine", vsphereMachineKey.Name)
 	}
 
+	// For CAPK, get providerID from KubevirtMachine spec
+	if machine.Spec.InfrastructureRef.Kind == "KubevirtMachine" || machine.Spec.InfrastructureRef.Kind == "KubeVirtMachine" {
+		kubevirtMachine := &unstructured.Unstructured{}
+		kubevirtMachine.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "infrastructure.cluster.x-k8s.io",
+			Version: "v1alpha1",
+			Kind:    "KubevirtMachine",
+		})
+		kubevirtMachineKey := types.NamespacedName{
+			Name:      machine.Spec.InfrastructureRef.Name,
+			Namespace: machine.Spec.InfrastructureRef.Namespace,
+		}
+
+		if err := r.Get(ctx, kubevirtMachineKey, kubevirtMachine); err != nil {
+			log.V(4).Info("Failed to get KubevirtMachine for providerID", "machine", machine.Name, "kubevirtMachine", kubevirtMachineKey.Name, "error", err)
+			return ""
+		}
+
+		if providerID, found, err := unstructured.NestedString(kubevirtMachine.Object, "spec", "providerID"); err == nil && found && providerID != "" {
+			log.V(4).Info("Found providerID in KubevirtMachine spec", "providerID", providerID, "machine", machine.Name, "kubevirtMachine", kubevirtMachineKey.Name)
+			return providerID
+		}
+	}
+
 	return ""
 }
