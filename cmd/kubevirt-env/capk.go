@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -16,7 +17,7 @@ import (
 )
 
 const (
-	capkVersion = "v0.1.10"
+	defaultCAPKVersionEnv = "CAPK_VERSION"
 )
 
 func newInstallCapkCmd() *cobra.Command {
@@ -105,7 +106,12 @@ func installCapk() error {
 		return nil
 	}
 
-	fmt.Printf("Installing CAPK %s...\n", capkVersion)
+	capkVersion := strings.TrimSpace(os.Getenv(defaultCAPKVersionEnv))
+	if capkVersion != "" {
+		fmt.Printf("Installing CAPK %s...\n", capkVersion)
+	} else {
+		fmt.Println("Installing CAPK (latest)...")
+	}
 
 	// Get bin directory
 	binDir := filepath.Join(".", "bin")
@@ -119,8 +125,15 @@ func installCapk() error {
 	}
 
 	// Run clusterctl init with KubeVirt infrastructure provider
-	fmt.Printf("Using CAPK version: %s\n", capkVersion)
-	clusterctlCmd := exec.Command("clusterctl", "init", "--infrastructure", fmt.Sprintf("kubevirt:%s", capkVersion))
+	var infraArg string
+	if capkVersion != "" {
+		fmt.Printf("Using CAPK version: %s\n", capkVersion)
+		infraArg = fmt.Sprintf("kubevirt:%s", capkVersion)
+	} else {
+		fmt.Println("Using CAPK version: latest")
+		infraArg = "kubevirt"
+	}
+	clusterctlCmd := exec.Command("clusterctl", "init", "--infrastructure", infraArg)
 	clusterctlCmd.Env = append(os.Environ(), "PATH="+path)
 	clusterctlCmd.Stdout = os.Stdout
 	clusterctlCmd.Stderr = os.Stderr

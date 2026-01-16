@@ -42,3 +42,4 @@ dist/
 .work-kubevirt-*
 
 ideas/*
+!ideas/CAPK_PARITY_GAP_ANALYSIS.md

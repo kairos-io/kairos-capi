@@ -24,6 +24,7 @@ go build -o bin/kubevirt-env ./cmd/kubevirt-env
 Notes:
 - `kubevirt-env setup` creates a kind cluster, installs a default StorageClass, Calico, CDI, KubeVirt, CAPI, CAPK, osbuilder, cert-manager, and Kairos CAPI.
 - KubeVirt emulation is enabled by default (set `KUBEVIRT_USE_EMULATION=false` to disable).
+- To pin CAPK to a specific version, set `CAPK_VERSION` (e.g., `CAPK_VERSION=v0.1.x`).
 
 ## Build and upload a Kairos image
 ```

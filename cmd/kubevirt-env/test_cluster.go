@@ -147,7 +147,7 @@ spec:
     kind: KairosControlPlane
     name: kairos-control-plane
 ---
-apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha4
 kind: KubevirtCluster
 metadata:
   name: kairos-cluster
@@ -171,7 +171,7 @@ spec:
   kairosConfigTemplate:
     name: kairos-config-template-control-plane
 ---
-apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha4
 kind: KubevirtMachineTemplate
 metadata:
   name: kairos-control-plane-template
