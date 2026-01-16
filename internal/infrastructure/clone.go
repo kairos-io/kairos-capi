@@ -142,9 +142,13 @@ func cloneKubevirtMachineTemplate(ctx context.Context, c client.Client, scheme *
 	// For CAPK, we create a KubevirtMachine from KubevirtMachineTemplate
 
 	kubevirtMachine := &unstructured.Unstructured{}
+	version := template.GroupVersionKind().Version
+	if version == "" {
+		version = "v1alpha1"
+	}
 	kubevirtMachine.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   "infrastructure.cluster.x-k8s.io",
-		Version: "v1alpha1",
+		Version: version,
 		Kind:    "KubevirtMachine",
 	})
 

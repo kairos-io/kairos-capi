@@ -218,6 +218,51 @@ func (r *KairosConfigReconciler) reconcileBootstrapData(ctx context.Context, log
 		}
 	}
 
+	// For CAPK: Only wait for providerID if KubevirtMachine is Ready (VM already provisioned)
+	// If KubevirtMachine is not Ready yet, allow secret creation so VM can be provisioned
+	if machine != nil && (machine.Spec.InfrastructureRef.Kind == "KubevirtMachine" || machine.Spec.InfrastructureRef.Kind == "KubeVirtMachine") && currentProviderID == "" {
+		kubevirtMachine := &unstructured.Unstructured{}
+		kubevirtMachine.SetGroupVersionKind(machine.Spec.InfrastructureRef.GroupVersionKind())
+		kubevirtMachineKey := types.NamespacedName{
+			Name:      machine.Spec.InfrastructureRef.Name,
+			Namespace: machine.Spec.InfrastructureRef.Namespace,
+		}
+
+		if err := r.Get(ctx, kubevirtMachineKey, kubevirtMachine); err == nil {
+			isReady := false
+			if ready, found, _ := unstructured.NestedBool(kubevirtMachine.Object, "status", "ready"); found && ready {
+				isReady = true
+			}
+			if !isReady {
+				conditions, found, _ := unstructured.NestedSlice(kubevirtMachine.Object, "status", "conditions")
+				if found {
+					for _, cond := range conditions {
+						condMap, ok := cond.(map[string]interface{})
+						if ok {
+							condType, _ := condMap["type"].(string)
+							condStatus, _ := condMap["status"].(string)
+							if condType == "Ready" && condStatus == "True" {
+								isReady = true
+								break
+							}
+						}
+					}
+				}
+			}
+
+			if isReady {
+				log.V(4).Info("KubevirtMachine is Ready but providerID not yet set, waiting briefly for CAPK to set it",
+					"machine", machine.Name,
+					"kubevirtMachine", kubevirtMachineKey.Name)
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			}
+
+			log.V(5).Info("KubevirtMachine not Ready yet, proceeding with bootstrap secret creation",
+				"machine", machine.Name,
+				"kubevirtMachine", kubevirtMachineKey.Name)
+		}
+	}
+
 	// If dataSecretName is already set, verify the secret exists and check if regeneration is needed
 	if kairosConfig.Status.DataSecretName != nil {
 		secret := &corev1.Secret{}
@@ -624,6 +669,23 @@ func (r *KairosConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	vsphereMachine := &unstructured.Unstructured{}
 	vsphereMachine.SetGroupVersionKind(vsphereMachineGVK)
 
+	// Create unstructured KubevirtMachine objects for watching (v1alpha1 and v1alpha4)
+	kubevirtMachineGVKAlpha1 := schema.GroupVersionKind{
+		Group:   "infrastructure.cluster.x-k8s.io",
+		Version: "v1alpha1",
+		Kind:    "KubevirtMachine",
+	}
+	kubevirtMachineAlpha1 := &unstructured.Unstructured{}
+	kubevirtMachineAlpha1.SetGroupVersionKind(kubevirtMachineGVKAlpha1)
+
+	kubevirtMachineGVKAlpha4 := schema.GroupVersionKind{
+		Group:   "infrastructure.cluster.x-k8s.io",
+		Version: "v1alpha4",
+		Kind:    "KubevirtMachine",
+	}
+	kubevirtMachineAlpha4 := &unstructured.Unstructured{}
+	kubevirtMachineAlpha4.SetGroupVersionKind(kubevirtMachineGVKAlpha4)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&bootstrapv1beta2.KairosConfig{}).
 		Watches(
@@ -633,6 +695,14 @@ func (r *KairosConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			vsphereMachine,
 			handler.EnqueueRequestsFromMapFunc(r.vsphereMachineToKairosConfig),
+		).
+		Watches(
+			kubevirtMachineAlpha1,
+			handler.EnqueueRequestsFromMapFunc(r.kubevirtMachineToKairosConfig),
+		).
+		Watches(
+			kubevirtMachineAlpha4,
+			handler.EnqueueRequestsFromMapFunc(r.kubevirtMachineToKairosConfig),
 		).
 		Complete(r)
 }
@@ -690,6 +760,41 @@ func (r *KairosConfigReconciler) vsphereMachineToKairosConfig(ctx context.Contex
 			machine.Spec.InfrastructureRef.Name == o.GetName() &&
 			machine.Spec.InfrastructureRef.Namespace == o.GetNamespace() {
 			// Check if Machine has a bootstrap config reference to KairosConfig
+			if machine.Spec.Bootstrap.ConfigRef != nil &&
+				machine.Spec.Bootstrap.ConfigRef.GroupVersionKind().Group == bootstrapv1beta2.GroupVersion.Group &&
+				machine.Spec.Bootstrap.ConfigRef.Kind == "KairosConfig" {
+				requests = append(requests, reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Name:      machine.Spec.Bootstrap.ConfigRef.Name,
+						Namespace: machine.Spec.Bootstrap.ConfigRef.Namespace,
+					},
+				})
+			}
+		}
+	}
+
+	return requests
+}
+
+// kubevirtMachineToKairosConfig maps a KubevirtMachine to its KairosConfig
+// This allows us to watch for KubevirtMachine changes (especially when providerID is set)
+// and trigger KairosConfig reconciliation to regenerate bootstrap secret with providerID
+func (r *KairosConfigReconciler) kubevirtMachineToKairosConfig(ctx context.Context, o client.Object) []reconcile.Request {
+	// Verify this is an unstructured object (KubevirtMachine)
+	if _, ok := o.(*unstructured.Unstructured); !ok {
+		return nil
+	}
+
+	machineList := &clusterv1.MachineList{}
+	if err := r.List(ctx, machineList, client.InNamespace(o.GetNamespace())); err != nil {
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for _, machine := range machineList.Items {
+		if (machine.Spec.InfrastructureRef.Kind == "KubevirtMachine" || machine.Spec.InfrastructureRef.Kind == "KubeVirtMachine") &&
+			machine.Spec.InfrastructureRef.Name == o.GetName() &&
+			machine.Spec.InfrastructureRef.Namespace == o.GetNamespace() {
 			if machine.Spec.Bootstrap.ConfigRef != nil &&
 				machine.Spec.Bootstrap.ConfigRef.GroupVersionKind().Group == bootstrapv1beta2.GroupVersion.Group &&
 				machine.Spec.Bootstrap.ConfigRef.Kind == "KairosConfig" {
@@ -771,11 +876,15 @@ func (r *KairosConfigReconciler) getProviderID(ctx context.Context, log logr.Log
 	// For CAPK, get providerID from KubevirtMachine spec
 	if machine.Spec.InfrastructureRef.Kind == "KubevirtMachine" || machine.Spec.InfrastructureRef.Kind == "KubeVirtMachine" {
 		kubevirtMachine := &unstructured.Unstructured{}
-		kubevirtMachine.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   "infrastructure.cluster.x-k8s.io",
-			Version: "v1alpha1",
-			Kind:    "KubevirtMachine",
-		})
+		kubevirtMachineGVK := machine.Spec.InfrastructureRef.GroupVersionKind()
+		if kubevirtMachineGVK.Group == "" || kubevirtMachineGVK.Version == "" {
+			kubevirtMachineGVK = schema.GroupVersionKind{
+				Group:   "infrastructure.cluster.x-k8s.io",
+				Version: "v1alpha1",
+				Kind:    "KubevirtMachine",
+			}
+		}
+		kubevirtMachine.SetGroupVersionKind(kubevirtMachineGVK)
 		kubevirtMachineKey := types.NamespacedName{
 			Name:      machine.Spec.InfrastructureRef.Name,
 			Namespace: machine.Spec.InfrastructureRef.Namespace,

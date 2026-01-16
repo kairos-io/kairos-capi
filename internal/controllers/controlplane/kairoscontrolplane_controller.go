@@ -21,6 +21,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -403,27 +405,72 @@ func (r *KairosControlPlaneReconciler) reconcileMachines(ctx context.Context, lo
 		return fmt.Errorf("failed to list control plane machines: %w", err)
 	}
 
+	// Sort machines by creation timestamp (oldest first) for stable operations
+	sort.Slice(machines, func(i, j int) bool {
+		return machines[i].CreationTimestamp.Before(&machines[j].CreationTimestamp)
+	})
+
 	currentReplicas := int32(len(machines))
 
 	log.Info("Reconciling control plane machines", "desired", desiredReplicas, "current", currentReplicas)
+
+	maxSurge := int32(1)
+	if kcp.Spec.RolloutStrategy != nil && kcp.Spec.RolloutStrategy.RollingUpdate != nil && kcp.Spec.RolloutStrategy.RollingUpdate.MaxSurge != nil {
+		maxSurge = *kcp.Spec.RolloutStrategy.RollingUpdate.MaxSurge
+	}
+
+	outdatedMachines := make([]*clusterv1.Machine, 0)
+	updatedReadyReplicas := int32(0)
+	for _, machine := range machines {
+		if r.machineMatchesVersion(machine, kcp.Spec.Version) {
+			if machine.Status.NodeRef != nil {
+				updatedReadyReplicas++
+			}
+			continue
+		}
+		outdatedMachines = append(outdatedMachines, machine)
+	}
+
+	// Rolling update behavior when machines are outdated
+	if len(outdatedMachines) > 0 {
+		if currentReplicas < desiredReplicas+maxSurge {
+			nextIndex := r.nextMachineIndex(machines, kcp.Name)
+			if err := r.createControlPlaneMachine(ctx, log, kcp, cluster, nextIndex); err != nil {
+				return fmt.Errorf("failed to create control plane machine during rollout: %w", err)
+			}
+			return nil
+		}
+
+		// If we are above desired replicas and have enough updated/ready replicas, delete one outdated machine
+		if currentReplicas > desiredReplicas && updatedReadyReplicas >= desiredReplicas {
+			target := outdatedMachines[0]
+			log.Info("Deleting outdated control plane machine", "machine", target.Name)
+			if err := r.Delete(ctx, target); err != nil {
+				return fmt.Errorf("failed to delete outdated control plane machine: %w", err)
+			}
+			return nil
+		}
+	}
 
 	// Create machines if needed
 	if currentReplicas < desiredReplicas {
 		toCreate := desiredReplicas - currentReplicas
 		for i := int32(0); i < toCreate; i++ {
-			if err := r.createControlPlaneMachine(ctx, log, kcp, cluster, currentReplicas+i); err != nil {
+			nextIndex := r.nextMachineIndex(machines, kcp.Name)
+			if err := r.createControlPlaneMachine(ctx, log, kcp, cluster, nextIndex); err != nil {
 				return fmt.Errorf("failed to create control plane machine: %w", err)
 			}
+			// Only create one per reconcile to avoid over-scaling
+			return nil
 		}
 	}
 
-	// Delete machines if needed (for MVP, we only support single control plane)
-	if currentReplicas > desiredReplicas && desiredReplicas == 1 {
-		// For MVP, delete excess machines
-		toDelete := currentReplicas - desiredReplicas
-		for i := int32(0); i < toDelete; i++ {
-			machine := machines[i]
-			if err := r.Delete(ctx, machine); err != nil {
+	// Delete machines if needed (scale down)
+	if currentReplicas > desiredReplicas {
+		target := r.selectMachineForDeletion(machines, outdatedMachines)
+		if target != nil {
+			log.Info("Scaling down control plane machine", "machine", target.Name)
+			if err := r.Delete(ctx, target); err != nil {
 				return fmt.Errorf("failed to delete control plane machine: %w", err)
 			}
 		}
@@ -611,6 +658,44 @@ func (r *KairosControlPlaneReconciler) getControlPlaneMachines(ctx context.Conte
 	return machines, nil
 }
 
+func (r *KairosControlPlaneReconciler) machineMatchesVersion(machine *clusterv1.Machine, desiredVersion string) bool {
+	if machine.Spec.Version == nil {
+		return false
+	}
+	return *machine.Spec.Version == desiredVersion
+}
+
+func (r *KairosControlPlaneReconciler) nextMachineIndex(machines []*clusterv1.Machine, kcpName string) int32 {
+	prefix := fmt.Sprintf("%s-", kcpName)
+	maxIndex := int32(-1)
+	for _, machine := range machines {
+		if !strings.HasPrefix(machine.Name, prefix) {
+			continue
+		}
+		suffix := strings.TrimPrefix(machine.Name, prefix)
+		if suffix == "" {
+			continue
+		}
+		if idx, err := strconv.Atoi(suffix); err == nil {
+			if int32(idx) > maxIndex {
+				maxIndex = int32(idx)
+			}
+		}
+	}
+	return maxIndex + 1
+}
+
+func (r *KairosControlPlaneReconciler) selectMachineForDeletion(machines []*clusterv1.Machine, outdatedMachines []*clusterv1.Machine) *clusterv1.Machine {
+	if len(outdatedMachines) > 0 {
+		return outdatedMachines[0]
+	}
+	if len(machines) == 0 {
+		return nil
+	}
+	// Delete the newest machine for scale down to reduce churn on older nodes
+	return machines[len(machines)-1]
+}
+
 func (r *KairosControlPlaneReconciler) updateStatus(ctx context.Context, log logr.Logger, kcp *controlplanev1beta2.KairosControlPlane, cluster *clusterv1.Cluster) error {
 	machines, err := r.getControlPlaneMachines(ctx, kcp, cluster)
 	if err != nil {
@@ -650,6 +735,12 @@ func (r *KairosControlPlaneReconciler) updateStatus(ctx context.Context, log log
 	kcp.Status.ReadyReplicas = readyReplicas
 	kcp.Status.UpdatedReplicas = updatedReplicas
 	kcp.Status.UnavailableReplicas = unavailableReplicas
+
+	selector := labels.SelectorFromSet(map[string]string{
+		clusterv1.ClusterNameLabel:         cluster.Name,
+		clusterv1.MachineControlPlaneLabel: "",
+	})
+	kcp.Status.Selector = selector.String()
 
 	// Log status field updates for debugging
 	log.Info("Updated control plane status fields",
@@ -853,7 +944,14 @@ func (r *KairosControlPlaneReconciler) ensureProviderIDOnNodes(ctx context.Conte
 	}
 
 	for _, machine := range machines {
-		if machine.Spec.ProviderID == nil || *machine.Spec.ProviderID == "" {
+		providerID := ""
+		if machine.Spec.ProviderID != nil {
+			providerID = *machine.Spec.ProviderID
+		}
+		if providerID == "" {
+			providerID = r.getInfrastructureProviderID(ctx, log, machine)
+		}
+		if providerID == "" {
 			continue
 		}
 		if machine.Status.NodeRef != nil {
@@ -865,6 +963,16 @@ func (r *KairosControlPlaneReconciler) ensureProviderIDOnNodes(ctx context.Conte
 			if addr.Address != "" {
 				addressSet[addr.Address] = struct{}{}
 			}
+		}
+		if len(addressSet) == 0 {
+			if ip, err := r.getNodeIP(ctx, log, machine); err == nil && ip != "" {
+				addressSet[ip] = struct{}{}
+			} else if err != nil {
+				log.V(4).Info("Failed to get node IP for providerID patch", "machine", machine.Name, "error", err)
+			}
+		}
+		if len(addressSet) == 0 {
+			continue
 		}
 
 		for i := range nodeList.Items {
@@ -880,13 +988,13 @@ func (r *KairosControlPlaneReconciler) ensureProviderIDOnNodes(ctx context.Conte
 				continue
 			}
 
-			if node.Spec.ProviderID == *machine.Spec.ProviderID {
+			if node.Spec.ProviderID == providerID {
 				log.V(4).Info("Node already has providerID", "node", node.Name, "providerID", node.Spec.ProviderID)
 				break
 			}
 
 			patchBase := node.DeepCopy()
-			node.Spec.ProviderID = *machine.Spec.ProviderID
+			node.Spec.ProviderID = providerID
 			if err := workloadClient.Patch(ctx, node, client.MergeFrom(patchBase)); err != nil {
 				return fmt.Errorf("failed to patch node providerID: %w", err)
 			}
@@ -902,8 +1010,55 @@ func (r *KairosControlPlaneReconciler) ensureProviderIDOnNodes(ctx context.Conte
 	return nil
 }
 
+// getInfrastructureProviderID attempts to retrieve providerID from the infrastructure machine object.
+func (r *KairosControlPlaneReconciler) getInfrastructureProviderID(ctx context.Context, log logr.Logger, machine *clusterv1.Machine) string {
+	if machine == nil || machine.Spec.InfrastructureRef.Kind == "" {
+		return ""
+	}
+
+	switch machine.Spec.InfrastructureRef.Kind {
+	case "VSphereMachine":
+		vsphereMachine := &unstructured.Unstructured{}
+		vsphereMachine.SetGroupVersionKind(machine.Spec.InfrastructureRef.GroupVersionKind())
+		vsphereMachineKey := types.NamespacedName{
+			Name:      machine.Spec.InfrastructureRef.Name,
+			Namespace: machine.Spec.InfrastructureRef.Namespace,
+		}
+		if err := r.Get(ctx, vsphereMachineKey, vsphereMachine); err != nil {
+			log.V(4).Info("Failed to get VSphereMachine for providerID", "machine", machine.Name, "error", err)
+			return ""
+		}
+
+		if providerID, found, err := unstructured.NestedString(vsphereMachine.Object, "spec", "providerID"); err == nil && found && providerID != "" {
+			return providerID
+		}
+		if vmUUID, found, err := unstructured.NestedString(vsphereMachine.Object, "status", "vmUUID"); err == nil && found && vmUUID != "" {
+			return fmt.Sprintf("vsphere://%s", vmUUID)
+		}
+		if providerID, found, err := unstructured.NestedString(vsphereMachine.Object, "status", "providerID"); err == nil && found && providerID != "" {
+			return providerID
+		}
+	case "KubevirtMachine", "KubeVirtMachine":
+		kubevirtMachine := &unstructured.Unstructured{}
+		kubevirtMachine.SetGroupVersionKind(machine.Spec.InfrastructureRef.GroupVersionKind())
+		kubevirtMachineKey := types.NamespacedName{
+			Name:      machine.Spec.InfrastructureRef.Name,
+			Namespace: machine.Spec.InfrastructureRef.Namespace,
+		}
+		if err := r.Get(ctx, kubevirtMachineKey, kubevirtMachine); err != nil {
+			log.V(4).Info("Failed to get KubevirtMachine for providerID", "machine", machine.Name, "error", err)
+			return ""
+		}
+		if providerID, found, err := unstructured.NestedString(kubevirtMachine.Object, "spec", "providerID"); err == nil && found && providerID != "" {
+			return providerID
+		}
+	}
+
+	return ""
+}
+
 // retrieveKubeconfigFromNode retrieves the kubeconfig from a control plane node
-// For VSphere, this SSHes into the VM and runs `k0s kubeconfig admin`
+// For VSphere/CAPK, this SSHes into the VM and runs `k0s kubeconfig admin`
 func (r *KairosControlPlaneReconciler) retrieveKubeconfigFromNode(ctx context.Context, log logr.Logger, machine *clusterv1.Machine, cluster *clusterv1.Cluster) ([]byte, error) {
 	// Get node IP from infrastructure provider
 	nodeIP, err := r.getNodeIP(ctx, log, machine)
@@ -933,51 +1088,69 @@ func (r *KairosControlPlaneReconciler) retrieveKubeconfigFromNode(ctx context.Co
 	return kubeconfig, nil
 }
 
-// getNodeIP retrieves the node IP from the infrastructure provider
-// For VSphere, this gets the IP from VSphereMachine or VSphereVM status.addresses
+// getNodeIP retrieves the node IP from the infrastructure provider.
+// Supports VSphere (VSphereMachine/VSphereVM) and CAPK (KubevirtMachine).
 func (r *KairosControlPlaneReconciler) getNodeIP(ctx context.Context, log logr.Logger, machine *clusterv1.Machine) (string, error) {
-	if machine.Spec.InfrastructureRef.Kind != "VSphereMachine" {
+	switch machine.Spec.InfrastructureRef.Kind {
+	case "VSphereMachine":
+		// First, try to get IP from VSphereMachine status
+		vsphereMachine := &unstructured.Unstructured{}
+		vsphereMachine.SetGroupVersionKind(machine.Spec.InfrastructureRef.GroupVersionKind())
+		vsphereMachineKey := types.NamespacedName{
+			Name:      machine.Spec.InfrastructureRef.Name,
+			Namespace: machine.Spec.InfrastructureRef.Namespace,
+		}
+
+		if err := r.Get(ctx, vsphereMachineKey, vsphereMachine); err != nil {
+			return "", fmt.Errorf("failed to get VSphereMachine: %w", err)
+		}
+
+		// Try to get IP from VSphereMachine status.addresses
+		if ip := r.extractIPFromUnstructured(vsphereMachine); ip != "" {
+			return ip, nil
+		}
+
+		// Fallback: try VSphereVM (CAPV creates VSphereVM with the same name)
+		vsphereVM := &unstructured.Unstructured{}
+		vsphereVM.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "infrastructure.cluster.x-k8s.io",
+			Version: "v1beta1",
+			Kind:    "VSphereVM",
+		})
+		vsphereVMKey := types.NamespacedName{
+			Name:      machine.Spec.InfrastructureRef.Name,
+			Namespace: machine.Spec.InfrastructureRef.Namespace,
+		}
+
+		if err := r.Get(ctx, vsphereVMKey, vsphereVM); err != nil {
+			return "", fmt.Errorf("failed to get VSphereVM: %w", err)
+		}
+
+		if ip := r.extractIPFromUnstructured(vsphereVM); ip != "" {
+			return ip, nil
+		}
+
+		return "", fmt.Errorf("no IP address found in VSphereMachine or VSphereVM status")
+	case "KubevirtMachine", "KubeVirtMachine":
+		kubevirtMachine := &unstructured.Unstructured{}
+		kubevirtMachine.SetGroupVersionKind(machine.Spec.InfrastructureRef.GroupVersionKind())
+		kubevirtMachineKey := types.NamespacedName{
+			Name:      machine.Spec.InfrastructureRef.Name,
+			Namespace: machine.Spec.InfrastructureRef.Namespace,
+		}
+
+		if err := r.Get(ctx, kubevirtMachineKey, kubevirtMachine); err != nil {
+			return "", fmt.Errorf("failed to get KubevirtMachine: %w", err)
+		}
+
+		if ip := r.extractIPFromUnstructured(kubevirtMachine); ip != "" {
+			return ip, nil
+		}
+
+		return "", fmt.Errorf("no IP address found in KubevirtMachine status")
+	default:
 		return "", fmt.Errorf("unsupported infrastructure provider: %s", machine.Spec.InfrastructureRef.Kind)
 	}
-
-	// First, try to get IP from VSphereMachine status
-	vsphereMachine := &unstructured.Unstructured{}
-	vsphereMachine.SetGroupVersionKind(machine.Spec.InfrastructureRef.GroupVersionKind())
-	vsphereMachineKey := types.NamespacedName{
-		Name:      machine.Spec.InfrastructureRef.Name,
-		Namespace: machine.Spec.InfrastructureRef.Namespace,
-	}
-
-	if err := r.Get(ctx, vsphereMachineKey, vsphereMachine); err != nil {
-		return "", fmt.Errorf("failed to get VSphereMachine: %w", err)
-	}
-
-	// Try to get IP from VSphereMachine status.addresses
-	if ip := r.extractIPFromUnstructured(vsphereMachine); ip != "" {
-		return ip, nil
-	}
-
-	// Fallback: try VSphereVM (CAPV creates VSphereVM with the same name)
-	vsphereVM := &unstructured.Unstructured{}
-	vsphereVM.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "infrastructure.cluster.x-k8s.io",
-		Version: "v1beta1",
-		Kind:    "VSphereVM",
-	})
-	vsphereVMKey := types.NamespacedName{
-		Name:      machine.Spec.InfrastructureRef.Name,
-		Namespace: machine.Spec.InfrastructureRef.Namespace,
-	}
-
-	if err := r.Get(ctx, vsphereVMKey, vsphereVM); err != nil {
-		return "", fmt.Errorf("failed to get VSphereVM: %w", err)
-	}
-
-	if ip := r.extractIPFromUnstructured(vsphereVM); ip != "" {
-		return ip, nil
-	}
-
-	return "", fmt.Errorf("no IP address found in VSphereMachine or VSphereVM status")
 }
 
 // extractIPFromUnstructured extracts IP address from an unstructured object's status
@@ -1297,14 +1470,14 @@ func (r *KairosControlPlaneReconciler) updateClusterStatus(ctx context.Context, 
 				}
 			}
 
-			// Fallback: Get IP from VSphereMachine/VSphereVM (same method used for kubeconfig)
+			// Fallback: Get IP from infrastructure provider (same method used for kubeconfig)
 			if controlPlaneAddress == "" {
-				log.V(4).Info("Machine.Status.Addresses empty, trying VSphereMachine/VSphereVM", "machine", machine.Name)
+				log.V(4).Info("Machine.Status.Addresses empty, trying infrastructure provider", "machine", machine.Name)
 				if ip, err := r.getNodeIP(ctx, log, machine); err == nil && ip != "" {
 					controlPlaneAddress = ip
-					log.V(4).Info("Found IP from VSphereMachine/VSphereVM", "machine", machine.Name, "ip", ip)
+					log.V(4).Info("Found IP from infrastructure provider", "machine", machine.Name, "ip", ip)
 				} else if err != nil {
-					log.V(4).Info("Failed to get IP from VSphereMachine/VSphereVM", "machine", machine.Name, "error", err)
+					log.V(4).Info("Failed to get IP from infrastructure provider", "machine", machine.Name, "error", err)
 				}
 			}
 
