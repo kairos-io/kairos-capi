@@ -32,7 +32,7 @@ spec:
   controlPlaneRef:
     apiGroup: controlplane.cluster.x-k8s.io
     kind: KairosControlPlane
-    name: kairos-control-plane-kv
+    name: kairos-control-plane-kv-capk
 ---
 apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
 kind: KubevirtCluster
@@ -44,7 +44,7 @@ spec: {}
 apiVersion: controlplane.cluster.x-k8s.io/v1beta2
 kind: KairosControlPlane
 metadata:
-  name: kairos-control-plane-kv
+  name: kairos-control-plane-kv-capk
   namespace: default
 spec:
   replicas: 1
@@ -53,15 +53,15 @@ spec:
     infrastructureRef:
       apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
       kind: KubevirtMachineTemplate
-      name: kairos-control-plane-template-hostmodel
+      name: kairos-control-plane-template-hostmodel-capk
       namespace: default
   kairosConfigTemplate:
-    name: kairos-config-template-control-plane
+    name: kairos-config-template-control-plane-capk
 ---
 apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
 kind: KubevirtMachineTemplate
 metadata:
-  name: kairos-control-plane-template-hostmodel
+  name: kairos-control-plane-template-hostmodel-capk
   namespace: default
 spec:
   template:
@@ -74,27 +74,31 @@ spec:
               labels:
                 kubevirt.io/domain: kairos-control-plane-template
             spec:
+              # Schedule on the bare metal node with KVM.
+              nodeSelector:
+                kubernetes.io/hostname: grogu
               domain:
                 cpu:
                   cores: 2
                   # Use host-model to match KubeVirt CPU model labels
-                  model: host-model
+                  model: host-passthrough
                 resources:
                   requests:
                     memory: 4Gi
                 devices:
                   disks:
+                  # Match testVM behavior: install disk first, ISO second.
                   - name: installeriso
                     cdrom:
                       bus: sata
-                    bootOrder: 1
+                    bootOrder: 2
                   - name: rootdisk
                     disk:
                       bus: virtio
-                    bootOrder: 2
+                    bootOrder: 1
                   interfaces:
                   - name: default
-                    masquerade: {}
+                    bridge: {}
                 features:
                   acpi:
                     enabled: true
@@ -118,7 +122,7 @@ spec:
 apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
 kind: KairosConfigTemplate
 metadata:
-  name: kairos-config-template-control-plane
+  name: kairos-config-template-control-plane-capk
   namespace: default
 spec:
   template:
@@ -130,6 +134,11 @@ spec:
         auto: true
         device: "/dev/vda"
         reboot: true
+      dnsServers:
+        - "172.16.56.5"
+        - "8.8.8.8"
+      podCIDR: "10.201.0.0/16"
+      serviceCIDR: "10.200.0.0/16"
       userName: kairos
       userPassword: kairos
       userGroups:

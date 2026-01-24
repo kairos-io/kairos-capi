@@ -131,6 +131,11 @@ type KairosConfigSpec struct {
 	// +optional
 	Manifests []Manifest `json:"manifests,omitempty"`
 
+	// Hostname is the node hostname to set inside the VM
+	// If set, it takes precedence over HostnamePrefix.
+	// +optional
+	Hostname string `json:"hostname,omitempty"`
+
 	// HostnamePrefix is the prefix for the hostname that will be set on the node
 	// The final hostname will be: {HostnamePrefix}{{ trunc 4 .MachineID }}
 	// For example, if HostnamePrefix is "metal-", the hostname will be "metal-{4-char-machine-id}"
@@ -138,6 +143,21 @@ type KairosConfigSpec struct {
 	// +kubebuilder:default=metal-
 	// +optional
 	HostnamePrefix string `json:"hostnamePrefix,omitempty"`
+
+	// DNSServers configures DNS resolvers for early boot
+	// This helps pulling CNI images before cluster DNS is ready.
+	// +optional
+	DNSServers []string `json:"dnsServers,omitempty"`
+
+	// PodCIDR configures the pod network CIDR for k0s
+	// Defaults to k0s defaults if not specified.
+	// +optional
+	PodCIDR string `json:"podCIDR,omitempty"`
+
+	// ServiceCIDR configures the service network CIDR for k0s
+	// Defaults to k0s defaults if not specified.
+	// +optional
+	ServiceCIDR string `json:"serviceCIDR,omitempty"`
 
 	// Install specifies the Kairos installation configuration
 	// This controls how Kairos OS is installed to disk

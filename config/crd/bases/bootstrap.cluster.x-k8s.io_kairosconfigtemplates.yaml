@@ -117,6 +117,13 @@ spec:
                         enum:
                         - k0s
                         type: string
+                      dnsServers:
+                        description: |-
+                          DNSServers configures DNS resolvers for early boot
+                          This helps pulling CNI images before cluster DNS is ready.
+                        items:
+                          type: string
+                        type: array
                       files:
                         description: Files specifies additional files to include in
                           the cloud-config
@@ -148,6 +155,11 @@ spec:
                         description: |-
                           GitHubUser is the GitHub username for SSH key access (e.g., "octocat")
                           If set, SSH keys will be fetched from GitHub
+                        type: string
+                      hostname:
+                        description: |-
+                          Hostname is the node hostname to set inside the VM
+                          If set, it takes precedence over HostnamePrefix.
                         type: string
                       hostnamePrefix:
                         default: metal-
@@ -218,6 +230,11 @@ spec:
                         description: Pause indicates that reconciliation should be
                           paused
                         type: boolean
+                      podCIDR:
+                        description: |-
+                          PodCIDR configures the pod network CIDR for k0s
+                          Defaults to k0s defaults if not specified.
+                        type: string
                       postCommands:
                         description: PostCommands are commands to run after k0s/k3s
                           installation
@@ -241,6 +258,11 @@ spec:
                       serverAddress:
                         description: ServerAddress is the address of the Kubernetes
                           API server (for worker nodes)
+                        type: string
+                      serviceCIDR:
+                        description: |-
+                          ServiceCIDR configures the service network CIDR for k0s
+                          Defaults to k0s defaults if not specified.
                         type: string
                       singleNode:
                         description: |-

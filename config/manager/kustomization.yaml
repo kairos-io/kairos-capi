@@ -1,10 +1,10 @@
 resources:
 - manager.yaml
-#patches:
-#- path: imagepullpolicy_patch.yaml
-#  target:
-#    kind: Deployment
-#    name: kairos-capi-controller-manager
+patches:
+- path: imagepullpolicy_patch.yaml
+  target:
+    kind: Deployment
+    name: kairos-capi-controller-manager
 images:
 - name: controller
   newName: ghcr.io/wrkode/kairos-capi

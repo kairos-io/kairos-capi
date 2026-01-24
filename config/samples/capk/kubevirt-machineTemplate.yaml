@@ -27,11 +27,11 @@ spec:
                   - name: installeriso
                     cdrom:
                       bus: sata
-                    bootOrder: 1
+                    bootOrder: 2
                   - name: rootdisk
                     disk:
                       bus: virtio
-                    bootOrder: 2
+                    bootOrder: 1
                   interfaces:
                   - name: default
                     masquerade: {}

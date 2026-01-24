@@ -27,6 +27,7 @@ func TestRenderK0sCloudConfig_ControlPlaneSingleNode(t *testing.T) {
 	data := TemplateData{
 		Role:           "control-plane",
 		SingleNode:     true,
+		Hostname:       "kairos-control-plane-kv-0",
 		UserName:       "kairos",
 		UserPassword:   "kairos",
 		UserGroups:     []string{"admin"},
@@ -44,9 +45,9 @@ func TestRenderK0sCloudConfig_ControlPlaneSingleNode(t *testing.T) {
 		t.Error("Missing cloud-config header")
 	}
 
-	// Check for hostname with Kairos templating
-	if !strings.Contains(result, "hostname: metal-{{ trunc 4 .MachineID }}") {
-		t.Error("Missing or incorrect hostname with Kairos templating")
+	// Check for explicit hostname
+	if !strings.Contains(result, "hostname: kairos-control-plane-kv-0") {
+		t.Error("Missing or incorrect explicit hostname")
 	}
 
 	// Check for k0s block
@@ -72,6 +73,11 @@ func TestRenderK0sCloudConfig_ControlPlaneSingleNode(t *testing.T) {
 	// Check for GitHub user
 	if !strings.Contains(result, "github:testuser") {
 		t.Error("Missing GitHub user SSH key")
+	}
+
+	// Check for capk groups list
+	if !strings.Contains(result, "groups: [users, admin]") {
+		t.Error("Missing capk groups list")
 	}
 }
 
@@ -145,6 +151,36 @@ func TestRenderK0sCloudConfig_Worker(t *testing.T) {
 	// Should NOT have k0s block (control-plane)
 	if strings.Contains(result, "\nk0s:\n") {
 		t.Error("Should not have k0s block for worker")
+	}
+}
+
+func TestRenderK0sCloudConfig_ControlPlaneWithCIDRs(t *testing.T) {
+	data := TemplateData{
+		Role:         "control-plane",
+		SingleNode:   true,
+		UserName:     "kairos",
+		UserPassword: "kairos",
+		UserGroups:   []string{"admin"},
+		PodCIDR:      "10.244.0.0/16",
+		ServiceCIDR:  "10.96.0.0/12",
+	}
+
+	result, err := RenderK0sCloudConfig(data)
+	if err != nil {
+		t.Fatalf("Failed to render template: %v", err)
+	}
+
+	if !strings.Contains(result, "--config /etc/k0s/k0s.yaml") {
+		t.Error("Missing k0s --config arg for custom CIDRs")
+	}
+	if !strings.Contains(result, "path: /etc/k0s/k0s.yaml") {
+		t.Error("Missing k0s config file write_files entry")
+	}
+	if !strings.Contains(result, "podCIDR: 10.244.0.0/16") {
+		t.Error("Missing podCIDR in k0s config file")
+	}
+	if !strings.Contains(result, "serviceCIDR: 10.96.0.0/12") {
+		t.Error("Missing serviceCIDR in k0s config file")
 	}
 }
 
@@ -243,6 +279,27 @@ func TestRenderK0sCloudConfig_WithInstallConfig(t *testing.T) {
 	// Check for install.reboot
 	if !strings.Contains(result, "reboot: true") {
 		t.Error("Missing install.reboot: true")
+	}
+}
+
+func TestRenderK0sCloudConfig_WithDNSServers(t *testing.T) {
+	data := TemplateData{
+		Role:           "control-plane",
+		SingleNode:     true,
+		UserName:       "kairos",
+		UserPassword:   "kairos",
+		UserGroups:     []string{"admin"},
+		HostnamePrefix: "metal-",
+		DNSServers:     []string{"1.1.1.1", "8.8.8.8"},
+	}
+
+	result, err := RenderK0sCloudConfig(data)
+	if err != nil {
+		t.Fatalf("Failed to render template: %v", err)
+	}
+
+	if !strings.Contains(result, "dns:\n        nameservers:\n          - 1.1.1.1\n          - 8.8.8.8") {
+		t.Error("Missing DNS servers initramfs block")
 	}
 }
 

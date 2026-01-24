@@ -188,6 +188,11 @@ func (in *KairosConfigSpec) DeepCopyInto(out *KairosConfigSpec) {
 		*out = make([]Manifest, len(*in))
 		copy(*out, *in)
 	}
+	if in.DNSServers != nil {
+		in, out := &in.DNSServers, &out.DNSServers
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.Install != nil {
 		in, out := &in.Install, &out.Install
 		*out = new(InstallConfig)

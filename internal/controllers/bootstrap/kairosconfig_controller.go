@@ -332,6 +332,20 @@ func (r *KairosConfigReconciler) reconcileBootstrapData(ctx context.Context, log
 					kairosConfig.Status.Initialization = &bootstrapv1beta2.KairosConfigInitialization{}
 				}
 				kairosConfig.Status.Initialization.DataSecretCreated = true
+
+				if isKubevirtMachine(machine) {
+					updated, found, err := r.sanitizeCapkUserdataSecret(ctx, log, kairosConfig, machine)
+					if err != nil {
+						return ctrl.Result{}, err
+					}
+					if !found {
+						return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+					}
+					if updated {
+						log.Info("Sanitized CAPK userdata secret", "secret", *kairosConfig.Status.DataSecretName)
+					}
+				}
+
 				return ctrl.Result{}, nil
 			}
 		}
@@ -354,7 +368,9 @@ func (r *KairosConfigReconciler) reconcileBootstrapData(ctx context.Context, log
 
 	// Create Secret with bootstrap data
 	secretName := ""
-	if kairosConfig.Status.DataSecretName != nil {
+	if machine != nil && machine.Spec.Bootstrap.DataSecretName != nil && *machine.Spec.Bootstrap.DataSecretName != "" {
+		secretName = *machine.Spec.Bootstrap.DataSecretName
+	} else if kairosConfig.Status.DataSecretName != nil && *kairosConfig.Status.DataSecretName != "" {
 		secretName = *kairosConfig.Status.DataSecretName
 	} else {
 		randomSuffix, err := randomString(6)
@@ -452,7 +468,146 @@ func (r *KairosConfigReconciler) reconcileBootstrapData(ctx context.Context, log
 	}
 	kairosConfig.Status.Initialization.DataSecretCreated = true
 
+	if isKubevirtMachine(machine) {
+		updated, found, err := r.sanitizeCapkUserdataSecret(ctx, log, kairosConfig, machine)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !found {
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
+		if updated {
+			log.Info("Sanitized CAPK userdata secret", "secret", secretName)
+		}
+	}
+
 	return ctrl.Result{}, nil
+}
+
+func isKubevirtMachine(machine *clusterv1.Machine) bool {
+	if machine == nil {
+		return false
+	}
+	return machine.Spec.InfrastructureRef.Kind == "KubevirtMachine" || machine.Spec.InfrastructureRef.Kind == "KubeVirtMachine"
+}
+
+func (r *KairosConfigReconciler) sanitizeCapkUserdataSecret(ctx context.Context, log logr.Logger, kairosConfig *bootstrapv1beta2.KairosConfig, machine *clusterv1.Machine) (bool, bool, error) {
+	secretName := ""
+	if machine != nil && machine.Spec.Bootstrap.DataSecretName != nil && *machine.Spec.Bootstrap.DataSecretName != "" {
+		secretName = *machine.Spec.Bootstrap.DataSecretName
+	} else if kairosConfig.Status.DataSecretName != nil && *kairosConfig.Status.DataSecretName != "" {
+		secretName = *kairosConfig.Status.DataSecretName
+	}
+	if secretName == "" {
+		return false, false, nil
+	}
+
+	userdataSecretName := fmt.Sprintf("%s-userdata", secretName)
+	secret := &corev1.Secret{}
+	secretKey := types.NamespacedName{
+		Name:      userdataSecretName,
+		Namespace: kairosConfig.Namespace,
+	}
+
+	if err := r.Get(ctx, secretKey, secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+
+	userdata, ok := secret.Data["userdata"]
+	if !ok || len(userdata) == 0 {
+		return false, true, nil
+	}
+
+	updated, changed := sanitizeCapkUserdata(string(userdata))
+	if !changed {
+		return false, true, nil
+	}
+
+	secret.Data["userdata"] = []byte(updated)
+	if err := r.Update(ctx, secret); err != nil {
+		return false, true, err
+	}
+
+	log.V(4).Info("Updated CAPK userdata secret", "secret", userdataSecretName)
+	return true, true, nil
+}
+
+func sanitizeCapkUserdata(content string) (string, bool) {
+	lines := strings.Split(content, "\n")
+	updated := make([]string, 0, len(lines))
+	currentUser := ""
+	inSSHKeys := false
+	sshIndent := 0
+	changed := false
+	expectGroupsList := false
+	groupsIndent := 0
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- name:") {
+			currentUser = strings.TrimSpace(strings.TrimPrefix(trimmed, "- name:"))
+			inSSHKeys = false
+			expectGroupsList = false
+		}
+
+		if expectGroupsList {
+			indent := len(line) - len(strings.TrimLeft(line, " "))
+			if indent > groupsIndent {
+				changed = true
+				continue
+			}
+			expectGroupsList = false
+		}
+
+		if inSSHKeys {
+			indent := len(line) - len(strings.TrimLeft(line, " "))
+			if indent > sshIndent {
+				if strings.HasPrefix(strings.TrimSpace(trimmed), "-") {
+					keyValue := strings.TrimSpace(strings.TrimPrefix(trimmed, "-"))
+					if strings.HasPrefix(keyValue, "\"") && strings.HasSuffix(keyValue, "\"") {
+						keyValue = strings.TrimSuffix(strings.TrimPrefix(keyValue, "\""), "\"")
+					}
+					if keyValue != "" {
+						line = strings.Repeat(" ", indent) + "- \"" + keyValue + "\""
+						changed = true
+					}
+				}
+				updated = append(updated, line)
+				continue
+			}
+			inSSHKeys = false
+		}
+
+		if currentUser == "capk" {
+			if strings.HasPrefix(trimmed, "sudo:") {
+				changed = true
+				continue
+			}
+			if strings.HasPrefix(trimmed, "ssh_authorized_keys:") {
+				inSSHKeys = true
+				sshIndent = len(line) - len(strings.TrimLeft(line, " "))
+				updated = append(updated, line)
+				continue
+			}
+			if trimmed == "groups: users, admin" {
+				indent := len(line) - len(strings.TrimLeft(line, " "))
+				line = strings.Repeat(" ", indent) + "groups: [users, admin]"
+				changed = true
+			} else if trimmed == "groups:" {
+				groupsIndent = len(line) - len(strings.TrimLeft(line, " "))
+				line = strings.Repeat(" ", groupsIndent) + "groups: [users, admin]"
+				expectGroupsList = true
+				changed = true
+			}
+		}
+
+		updated = append(updated, line)
+	}
+
+	return strings.Join(updated, "\n"), changed
 }
 
 func (r *KairosConfigReconciler) generateCloudConfig(ctx context.Context, log logr.Logger, kairosConfig *bootstrapv1beta2.KairosConfig, machine *clusterv1.Machine, cluster *clusterv1.Cluster) (string, error) {
@@ -590,6 +745,12 @@ func (r *KairosConfigReconciler) generateK0sCloudConfig(ctx context.Context, log
 		hostnamePrefix = "metal-"
 	}
 
+	// Prefer explicit hostname, otherwise use Machine name
+	hostname := kairosConfig.Spec.Hostname
+	if hostname == "" && machine != nil {
+		hostname = machine.Name
+	}
+
 	// Set install configuration (with defaults)
 	var installConfig *bootstrap.InstallConfig
 	if kairosConfig.Spec.Install != nil {
@@ -609,6 +770,12 @@ func (r *KairosConfigReconciler) generateK0sCloudConfig(ctx context.Context, log
 		}
 	}
 
+	if installConfig != nil {
+		log.Info("Using install configuration", "auto", installConfig.Auto, "device", installConfig.Device, "reboot", installConfig.Reboot)
+	} else {
+		log.Info("No install configuration provided; install block will be omitted")
+	}
+
 	// Get providerID from Machine's infrastructure reference
 	// This is needed to set the Node's providerID so the Machine controller can match Nodes to Machines
 	providerID := r.getProviderID(ctx, log, machine)
@@ -617,6 +784,7 @@ func (r *KairosConfigReconciler) generateK0sCloudConfig(ctx context.Context, log
 	templateData := bootstrap.TemplateData{
 		Role:           role,
 		SingleNode:     singleNode,
+		Hostname:       hostname,
 		UserName:       userName,
 		UserPassword:   userPassword,
 		UserGroups:     userGroups,
@@ -625,6 +793,9 @@ func (r *KairosConfigReconciler) generateK0sCloudConfig(ctx context.Context, log
 		WorkerToken:    workerToken,
 		Manifests:      kairosConfig.Spec.Manifests,
 		HostnamePrefix: hostnamePrefix,
+		DNSServers:     kairosConfig.Spec.DNSServers,
+		PodCIDR:        kairosConfig.Spec.PodCIDR,
+		ServiceCIDR:    kairosConfig.Spec.ServiceCIDR,
 		Install:        installConfig,
 		ProviderID:     providerID,
 	}
@@ -691,6 +862,10 @@ func (r *KairosConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&bootstrapv1beta2.KairosConfig{}).
 		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.secretToKairosConfig),
+		).
+		Watches(
 			&clusterv1.Machine{},
 			handler.EnqueueRequestsFromMapFunc(r.machineToKairosConfig),
 		).
@@ -718,6 +893,54 @@ func (r *KairosConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *KairosConfigReconciler) gvkExists(mgr ctrl.Manager, gvk schema.GroupVersionKind) bool {
 	_, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version)
 	return err == nil
+}
+
+// secretToKairosConfig maps CAPK userdata secrets to their owning KairosConfig
+func (r *KairosConfigReconciler) secretToKairosConfig(ctx context.Context, o client.Object) []reconcile.Request {
+	secret, ok := o.(*corev1.Secret)
+	if !ok {
+		return nil
+	}
+	if !strings.HasSuffix(secret.Name, "-userdata") {
+		return nil
+	}
+	if _, ok := secret.Labels[clusterv1.ClusterNameLabel]; !ok {
+		return nil
+	}
+
+	machineList := &clusterv1.MachineList{}
+	if err := r.List(ctx, machineList, client.InNamespace(secret.Namespace)); err != nil {
+		return nil
+	}
+
+	bootstrapSecretName := strings.TrimSuffix(secret.Name, "-userdata")
+	for _, machine := range machineList.Items {
+		if machine.Spec.Bootstrap.DataSecretName == nil {
+			continue
+		}
+		if *machine.Spec.Bootstrap.DataSecretName != bootstrapSecretName {
+			continue
+		}
+		if machine.Spec.Bootstrap.ConfigRef == nil {
+			continue
+		}
+		if machine.Spec.Bootstrap.ConfigRef.GroupVersionKind().Group != bootstrapv1beta2.GroupVersion.Group {
+			continue
+		}
+		if machine.Spec.Bootstrap.ConfigRef.Kind != "KairosConfig" {
+			continue
+		}
+		return []reconcile.Request{
+			{
+				NamespacedName: types.NamespacedName{
+					Name:      machine.Spec.Bootstrap.ConfigRef.Name,
+					Namespace: machine.Spec.Bootstrap.ConfigRef.Namespace,
+				},
+			},
+		}
+	}
+
+	return nil
 }
 
 // machineToKairosConfig maps a Machine to its KairosConfig

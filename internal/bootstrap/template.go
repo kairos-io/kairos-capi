@@ -33,6 +33,7 @@ var templateFS embed.FS
 type TemplateData struct {
 	Role           string
 	SingleNode     bool
+	Hostname       string
 	UserName       string
 	UserPassword   string
 	UserGroups     []string
@@ -41,6 +42,9 @@ type TemplateData struct {
 	WorkerToken    string
 	Manifests      []bootstrapv1beta2.Manifest
 	HostnamePrefix string
+	DNSServers     []string
+	PodCIDR        string
+	ServiceCIDR    string
 	Install        *InstallConfig
 	ProviderID     string // ProviderID for the Node (e.g., "vsphere://<vm-uuid>")
 }

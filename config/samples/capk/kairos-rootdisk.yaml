@@ -10,5 +10,5 @@ spec:
     accessModes: ["ReadWriteOnce"]
     resources:
       requests:
-        storage: 6Gi
-    storageClassName: local-path
+        storage: 5Gi
+    storageClassName: longhorn

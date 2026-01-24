@@ -24,6 +24,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/pointer"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -91,6 +93,68 @@ func TestGenerateK0sCloudConfig_ControlPlaneSingleNode(t *testing.T) {
 	g.Expect(cloudConfig).To(ContainSubstring("enabled: true"))
 	g.Expect(cloudConfig).To(ContainSubstring("--single"))
 	g.Expect(cloudConfig).NotTo(ContainSubstring("k0s-worker:"))
+}
+
+func TestGenerateK0sCloudConfig_ControlPlaneWithCIDRs(t *testing.T) {
+	g := NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(bootstrapv1beta2.AddToScheme(scheme)).To(Succeed())
+	g.Expect(clusterv1.AddToScheme(scheme)).To(Succeed())
+	g.Expect(corev1.AddToScheme(scheme)).To(Succeed())
+
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := &KairosConfigReconciler{
+		Client: client,
+		Scheme: scheme,
+	}
+
+	kairosConfig := &bootstrapv1beta2.KairosConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-config",
+			Namespace: "default",
+		},
+		Spec: bootstrapv1beta2.KairosConfigSpec{
+			Role:              "control-plane",
+			Distribution:      "k0s",
+			KubernetesVersion: "v1.30.0+k0s.0",
+			SingleNode:        true,
+			UserName:          "kairos",
+			UserPassword:      "kairos",
+			UserGroups:        []string{"admin"},
+			PodCIDR:           "10.244.0.0/16",
+			ServiceCIDR:       "10.96.0.0/12",
+		},
+	}
+
+	machine := &clusterv1.Machine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-machine",
+			Namespace: "default",
+		},
+	}
+
+	cluster := &clusterv1.Cluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster",
+			Namespace: "default",
+		},
+	}
+
+	cloudConfig, err := reconciler.generateK0sCloudConfig(
+		context.Background(),
+		log.Log,
+		kairosConfig,
+		machine,
+		cluster,
+		"control-plane",
+		"",
+	)
+
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(cloudConfig).To(ContainSubstring("--config /etc/k0s/k0s.yaml"))
+	g.Expect(cloudConfig).To(ContainSubstring("podCIDR: 10.244.0.0/16"))
+	g.Expect(cloudConfig).To(ContainSubstring("serviceCIDR: 10.96.0.0/12"))
 }
 
 func TestGenerateK0sCloudConfig_ControlPlaneMultiNode(t *testing.T) {
@@ -217,6 +281,121 @@ func TestGenerateK0sCloudConfig_WorkerWithToken(t *testing.T) {
 	g.Expect(cloudConfig).To(ContainSubstring("path: /etc/k0s/token"))
 	g.Expect(cloudConfig).To(ContainSubstring("test-token-12345"))
 	g.Expect(cloudConfig).NotTo(ContainSubstring("k0s:"))
+}
+
+func TestSanitizeCapkUserdata(t *testing.T) {
+	g := NewWithT(t)
+
+	input := `#cloud-config
+users:
+- name: kairos
+  passwd: kairos
+  groups:
+    - admin
+- name: capk
+  gecos: CAPK User
+  sudo: ALL=(ALL) NOPASSWD:ALL
+  groups: users, admin
+  ssh_authorized_keys:
+    - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7
+k0s:
+  enabled: true`
+
+	output, changed := sanitizeCapkUserdata(input)
+
+	g.Expect(changed).To(BeTrue())
+	g.Expect(output).To(ContainSubstring("gecos: CAPK User"))
+	g.Expect(output).To(ContainSubstring("groups: [users, admin]"))
+	g.Expect(output).NotTo(ContainSubstring("sudo: ALL=(ALL) NOPASSWD:ALL"))
+	g.Expect(output).To(ContainSubstring("ssh_authorized_keys:"))
+	g.Expect(output).To(ContainSubstring("- \"ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7\""))
+}
+
+func TestSanitizeCapkUserdata_NormalizesListGroups(t *testing.T) {
+	g := NewWithT(t)
+
+	input := `#cloud-config
+users:
+- name: capk
+  groups:
+    - users
+    - admin
+  ssh_authorized_keys:
+    - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7
+`
+
+	output, changed := sanitizeCapkUserdata(input)
+
+	g.Expect(changed).To(BeTrue())
+	g.Expect(output).To(ContainSubstring("groups: [users, admin]"))
+	g.Expect(output).To(ContainSubstring("ssh_authorized_keys:"))
+	g.Expect(output).To(ContainSubstring("- \"ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7\""))
+}
+
+func TestSanitizeCapkUserdataSecret_UsesMachineSecretName(t *testing.T) {
+	g := NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(bootstrapv1beta2.AddToScheme(scheme)).To(Succeed())
+	g.Expect(clusterv1.AddToScheme(scheme)).To(Succeed())
+	g.Expect(corev1.AddToScheme(scheme)).To(Succeed())
+
+	userdata := `#cloud-config
+users:
+- name: capk
+  groups: users, admin
+  ssh_authorized_keys:
+    - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7
+`
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "machine-secret-userdata",
+			Namespace: "default",
+		},
+		Data: map[string][]byte{
+			"userdata": []byte(userdata),
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	reconciler := &KairosConfigReconciler{
+		Client: client,
+		Scheme: scheme,
+	}
+
+	kairosConfig := &bootstrapv1beta2.KairosConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-config",
+			Namespace: "default",
+		},
+		Status: bootstrapv1beta2.KairosConfigStatus{
+			DataSecretName: pointer.String("status-secret"),
+		},
+	}
+
+	machine := &clusterv1.Machine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-machine",
+			Namespace: "default",
+		},
+		Spec: clusterv1.MachineSpec{
+			Bootstrap: clusterv1.Bootstrap{
+				DataSecretName: pointer.String("machine-secret"),
+			},
+		},
+	}
+
+	updated, found, err := reconciler.sanitizeCapkUserdataSecret(context.Background(), log.Log, kairosConfig, machine)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(found).To(BeTrue())
+	g.Expect(updated).To(BeTrue())
+
+	updatedSecret := &corev1.Secret{}
+	g.Expect(client.Get(context.Background(), types.NamespacedName{Name: "machine-secret-userdata", Namespace: "default"}, updatedSecret)).To(Succeed())
+	g.Expect(string(updatedSecret.Data["userdata"])).To(ContainSubstring("groups: [users, admin]"))
+	g.Expect(string(updatedSecret.Data["userdata"])).To(ContainSubstring("ssh_authorized_keys:"))
+	g.Expect(string(updatedSecret.Data["userdata"])).To(ContainSubstring("- \"ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7\""))
 }
 
 func TestGenerateK0sCloudConfig_WorkerWithTokenSecretRef(t *testing.T) {
