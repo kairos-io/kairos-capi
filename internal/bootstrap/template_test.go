@@ -184,6 +184,27 @@ func TestRenderK0sCloudConfig_ControlPlaneWithCIDRs(t *testing.T) {
 	}
 }
 
+func TestRenderK0sCloudConfig_CapkBootstrapTrap(t *testing.T) {
+	data := TemplateData{
+		Role:       "control-plane",
+		SingleNode: true,
+		UserName:   "kairos",
+		IsKubeVirt: true,
+	}
+
+	result, err := RenderK0sCloudConfig(data)
+	if err != nil {
+		t.Fatalf("Failed to render template: %v", err)
+	}
+
+	if !strings.Contains(result, "CAPK: always mark bootstrap success on script exit") {
+		t.Error("Missing CAPK bootstrap success trap for KubeVirt")
+	}
+	if !strings.Contains(result, "bootstrap-success.complete") {
+		t.Error("Missing bootstrap success file creation for KubeVirt")
+	}
+}
+
 func TestRenderK0sCloudConfig_WithManifests(t *testing.T) {
 	data := TemplateData{
 		Role:           "control-plane",

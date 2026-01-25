@@ -796,6 +796,7 @@ func (r *KairosConfigReconciler) generateK0sCloudConfig(ctx context.Context, log
 		DNSServers:     kairosConfig.Spec.DNSServers,
 		PodCIDR:        kairosConfig.Spec.PodCIDR,
 		ServiceCIDR:    kairosConfig.Spec.ServiceCIDR,
+		IsKubeVirt:     isKubevirtMachine(machine),
 		Install:        installConfig,
 		ProviderID:     providerID,
 	}

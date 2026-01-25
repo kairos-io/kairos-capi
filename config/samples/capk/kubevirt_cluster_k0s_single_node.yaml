@@ -98,8 +98,10 @@ spec:
                     bootOrder: 1
                   interfaces:
                   - name: default
-                    bridge: {}
+                    masquerade: {}
                 features:
+                  smm:
+                    enabled: true
                   acpi:
                     enabled: true
                 # Use UEFI boot (image has GPT partition table with EFI System partition)
@@ -107,7 +109,7 @@ spec:
                 firmware:
                   bootloader:
                     efi:
-                      secureBoot: false
+                      secureBoot: true
               networks:
               - name: default
                 pod: {}

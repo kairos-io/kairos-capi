@@ -157,6 +157,71 @@ func TestGenerateK0sCloudConfig_ControlPlaneWithCIDRs(t *testing.T) {
 	g.Expect(cloudConfig).To(ContainSubstring("serviceCIDR: 10.96.0.0/12"))
 }
 
+func TestGenerateK0sCloudConfig_ControlPlaneKubeVirtBootstrapTrap(t *testing.T) {
+	g := NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(bootstrapv1beta2.AddToScheme(scheme)).To(Succeed())
+	g.Expect(clusterv1.AddToScheme(scheme)).To(Succeed())
+	g.Expect(corev1.AddToScheme(scheme)).To(Succeed())
+
+	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	reconciler := &KairosConfigReconciler{
+		Client: client,
+		Scheme: scheme,
+	}
+
+	kairosConfig := &bootstrapv1beta2.KairosConfig{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-config",
+			Namespace: "default",
+		},
+		Spec: bootstrapv1beta2.KairosConfigSpec{
+			Role:              "control-plane",
+			Distribution:      "k0s",
+			KubernetesVersion: "v1.30.0+k0s.0",
+			SingleNode:        true,
+			UserName:          "kairos",
+			UserPassword:      "kairos",
+			UserGroups:        []string{"admin"},
+		},
+	}
+
+	machine := &clusterv1.Machine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-machine",
+			Namespace: "default",
+		},
+		Spec: clusterv1.MachineSpec{
+			InfrastructureRef: corev1.ObjectReference{
+				Kind:      "KubevirtMachine",
+				Name:      "test-kubevirt-machine",
+				Namespace: "default",
+			},
+		},
+	}
+
+	cluster := &clusterv1.Cluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster",
+			Namespace: "default",
+		},
+	}
+
+	cloudConfig, err := reconciler.generateK0sCloudConfig(
+		context.Background(),
+		log.Log,
+		kairosConfig,
+		machine,
+		cluster,
+		"control-plane",
+		"",
+	)
+
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(cloudConfig).To(ContainSubstring("CAPK: always mark bootstrap success on script exit"))
+}
+
 func TestGenerateK0sCloudConfig_ControlPlaneMultiNode(t *testing.T) {
 	g := NewWithT(t)
 

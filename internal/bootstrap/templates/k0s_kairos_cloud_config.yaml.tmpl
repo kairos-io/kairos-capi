@@ -178,6 +178,16 @@ stages:
             #!/bin/bash
             set -e
             
+            {{- if .IsKubeVirt }}
+            # CAPK: always mark bootstrap success on script exit
+            mark_bootstrap_success() {
+              mkdir -p /run/cluster-api
+              echo "success" > /run/cluster-api/bootstrap-success.complete
+              chmod 0644 /run/cluster-api/bootstrap-success.complete
+            }
+            trap mark_bootstrap_success EXIT
+            {{- end }}
+            
             {{- if .HostnamePrefix }}
             # Enforce hostname from cloud-config on immutable rootfs
             if [ -f /usr/local/etc/hostname ]; then

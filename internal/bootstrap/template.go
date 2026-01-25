@@ -45,6 +45,7 @@ type TemplateData struct {
 	DNSServers     []string
 	PodCIDR        string
 	ServiceCIDR    string
+	IsKubeVirt     bool
 	Install        *InstallConfig
 	ProviderID     string // ProviderID for the Node (e.g., "vsphere://<vm-uuid>")
 }
