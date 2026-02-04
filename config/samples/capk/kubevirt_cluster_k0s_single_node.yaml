@@ -98,7 +98,7 @@ spec:
                     bootOrder: 1
                   interfaces:
                   - name: default
-                    bridge: {}
+                    masquerade: {}
                 features:
                   smm:
                     enabled: true
@@ -112,8 +112,9 @@ spec:
                       secureBoot: true
               networks:
               - name: default
-                multus:
-                  networkName: lan-bridge
+                #multus:
+                #  networkName: lan-bridge
+                pod: {}
               volumes:
               - name: installeriso
                 dataVolume:
@@ -142,6 +143,8 @@ spec:
         - "8.8.8.8"
       podCIDR: "10.201.0.0/16"
       serviceCIDR: "10.200.0.0/16"
+      # Optional: Override detected control-plane IP for KubeVirt/multus
+      # primaryIP: "192.168.1.50"
       userName: kairos
       userPassword: kairos
       userGroups:

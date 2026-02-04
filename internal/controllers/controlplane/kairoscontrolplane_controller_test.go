@@ -18,6 +18,7 @@ package controlplane
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	. "github.com/onsi/gomega"
@@ -229,4 +230,109 @@ func TestCreateControlPlaneMachine_MultiNode(t *testing.T) {
 	g.Expect(err).NotTo(HaveOccurred())
 	g.Expect(kairosConfig.Spec.SingleNode).To(BeFalse())
 	g.Expect(kairosConfig.Spec.Role).To(Equal("control-plane"))
+}
+
+func TestResolveSSHHost_KubevirtFallback(t *testing.T) {
+	g := NewWithT(t)
+
+	machine := &clusterv1.Machine{
+		Spec: clusterv1.MachineSpec{
+			InfrastructureRef: corev1.ObjectReference{
+				Kind: "KubevirtMachine",
+			},
+		},
+	}
+	cluster := &clusterv1.Cluster{
+		Spec: clusterv1.ClusterSpec{
+			ControlPlaneEndpoint: clusterv1.APIEndpoint{
+				Host: "10.111.124.223",
+			},
+		},
+	}
+
+	host, err := resolveSSHHost(machine, cluster, "", errors.New("no ip in status"), log.Log)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(host).To(Equal("10.111.124.223"))
+}
+
+func TestResolveSSHHost_NoFallbackForVsphere(t *testing.T) {
+	g := NewWithT(t)
+
+	expectedErr := errors.New("no ip in status")
+	machine := &clusterv1.Machine{
+		Spec: clusterv1.MachineSpec{
+			InfrastructureRef: corev1.ObjectReference{
+				Kind: "VSphereMachine",
+			},
+		},
+	}
+	cluster := &clusterv1.Cluster{
+		Spec: clusterv1.ClusterSpec{
+			ControlPlaneEndpoint: clusterv1.APIEndpoint{
+				Host: "10.111.124.223",
+			},
+		},
+	}
+
+	_, err := resolveSSHHost(machine, cluster, "", expectedErr, log.Log)
+	g.Expect(err).To(MatchError(expectedErr))
+}
+
+func TestGetNodeIP_KubevirtVMIFallback(t *testing.T) {
+	g := NewWithT(t)
+
+	scheme := runtime.NewScheme()
+	g.Expect(bootstrapv1beta2.AddToScheme(scheme)).To(Succeed())
+	g.Expect(controlplanev1beta2.AddToScheme(scheme)).To(Succeed())
+	g.Expect(clusterv1.AddToScheme(scheme)).To(Succeed())
+	g.Expect(corev1.AddToScheme(scheme)).To(Succeed())
+
+	kubevirtMachine := &unstructured.Unstructured{}
+	kubevirtMachine.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "infrastructure.cluster.x-k8s.io",
+		Version: "v1alpha1",
+		Kind:    "KubevirtMachine",
+	})
+	kubevirtMachine.SetName("test-km")
+	kubevirtMachine.SetNamespace("default")
+
+	vmi := &unstructured.Unstructured{}
+	vmi.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "kubevirt.io",
+		Version: "v1",
+		Kind:    "VirtualMachineInstance",
+	})
+	vmi.SetName("test-km")
+	vmi.SetNamespace("default")
+	_ = unstructured.SetNestedSlice(vmi.Object, []interface{}{
+		map[string]interface{}{
+			"name":      "default",
+			"ipAddress": "192.168.100.10",
+		},
+	}, "status", "interfaces")
+
+	machine := &clusterv1.Machine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-machine",
+			Namespace: "default",
+		},
+		Spec: clusterv1.MachineSpec{
+			InfrastructureRef: corev1.ObjectReference{
+				APIVersion: "infrastructure.cluster.x-k8s.io/v1alpha1",
+				Kind:       "KubevirtMachine",
+				Name:       "test-km",
+				Namespace:  "default",
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(kubevirtMachine, vmi).Build()
+	reconciler := &KairosControlPlaneReconciler{
+		Client: client,
+		Scheme: scheme,
+	}
+
+	ip, err := reconciler.getNodeIP(context.Background(), log.Log, machine)
+	g.Expect(err).NotTo(HaveOccurred())
+	g.Expect(ip).To(Equal("192.168.100.10"))
 }

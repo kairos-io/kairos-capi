@@ -57,3 +57,4 @@ make test-kubevirt
 ## Troubleshooting
 - If VMs do not start, confirm KubeVirt is `Available` and that `local-path` is the default StorageClass.
 - If you have `/dev/kvm` available and want hardware acceleration, set `KUBEVIRT_USE_EMULATION=false` before `kubevirt-env setup`.
+- If you use bridged/multus networking and the management cluster stays NotReady, ensure `spec.controlPlaneEndpoint.host` is reachable from the CAPI controllers; KubevirtMachine status may not report VM IPs in this mode.

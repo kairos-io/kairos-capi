@@ -159,6 +159,11 @@ type KairosConfigSpec struct {
 	// +optional
 	ServiceCIDR string `json:"serviceCIDR,omitempty"`
 
+	// PrimaryIP overrides the detected node IP for KubeVirt control-plane
+	// certificates and endpoint configuration. This sets KAIROS_PRIMARY_IP.
+	// +optional
+	PrimaryIP string `json:"primaryIP,omitempty"`
+
 	// Install specifies the Kairos installation configuration
 	// This controls how Kairos OS is installed to disk
 	// +optional

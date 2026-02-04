@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,9 +42,11 @@ import (
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/conditions"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	bootstrapv1beta2 "github.com/wrkode/kairos-capi/api/bootstrap/v1beta2"
@@ -455,7 +458,7 @@ func (r *KairosControlPlaneReconciler) reconcileMachines(ctx context.Context, lo
 	// Create machines if needed
 	if currentReplicas < desiredReplicas {
 		toCreate := desiredReplicas - currentReplicas
-		for i := int32(0); i < toCreate; i++ {
+		if toCreate > 0 {
 			nextIndex := r.nextMachineIndex(machines, kcp.Name)
 			if err := r.createControlPlaneMachine(ctx, log, kcp, cluster, nextIndex); err != nil {
 				return fmt.Errorf("failed to create control plane machine: %w", err)
@@ -851,6 +854,17 @@ func (r *KairosControlPlaneReconciler) reconcileKubeconfig(ctx context.Context, 
 			"bootstrapReady", conditions.IsTrue(readyMachine, clusterv1.BootstrapReadyCondition))
 	}
 
+	// For KubeVirt, skip SSH once kubeconfig is present to avoid timeouts in bridged setups.
+	if isKubevirtMachine(readyMachine) {
+		kubevirtSecret := &corev1.Secret{}
+		if err := r.Get(ctx, secretKey, kubevirtSecret); err == nil {
+			if kubeconfig, ok := kubevirtSecret.Data["value"]; ok && len(kubeconfig) > 0 {
+				log.Info("Skipping SSH kubeconfig retrieval for KubeVirt; secret already exists", "secret", secretName)
+				return nil
+			}
+		}
+	}
+
 	// Retrieve kubeconfig from the node
 	// For k0s, the kubeconfig is at /var/lib/k0s/pki/admin.conf
 	// We'll use the infrastructure provider to get the node IP and SSH into it
@@ -1061,16 +1075,13 @@ func (r *KairosControlPlaneReconciler) getInfrastructureProviderID(ctx context.C
 // For VSphere/CAPK, this SSHes into the VM and runs `k0s kubeconfig admin`
 func (r *KairosControlPlaneReconciler) retrieveKubeconfigFromNode(ctx context.Context, log logr.Logger, machine *clusterv1.Machine, cluster *clusterv1.Cluster) ([]byte, error) {
 	// Get node IP from infrastructure provider
-	nodeIP, err := r.getNodeIP(ctx, log, machine)
+	nodeIP, nodeErr := r.getNodeIP(ctx, log, machine)
+	sshHost, err := resolveSSHHost(machine, cluster, nodeIP, nodeErr, log)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get node IP: %w", err)
+		return nil, fmt.Errorf("failed to resolve SSH host: %w", err)
 	}
 
-	if nodeIP == "" {
-		return nil, fmt.Errorf("node IP not available yet")
-	}
-
-	log.Info("Retrieving kubeconfig from node", "nodeIP", nodeIP)
+	log.Info("Retrieving kubeconfig from node", "nodeIP", sshHost)
 
 	// Get SSH credentials from KairosConfig
 	userName, userPassword, err := r.getSSHCredentials(ctx, log, machine)
@@ -1079,12 +1090,12 @@ func (r *KairosControlPlaneReconciler) retrieveKubeconfigFromNode(ctx context.Co
 	}
 
 	// SSH into the node and run k0s kubeconfig admin
-	kubeconfig, err := r.executeK0sKubeconfigCommand(ctx, log, nodeIP, userName, userPassword)
+	kubeconfig, err := r.executeK0sKubeconfigCommand(ctx, log, sshHost, userName, userPassword)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute k0s kubeconfig command: %w", err)
 	}
 
-	log.Info("Successfully retrieved kubeconfig", "nodeIP", nodeIP, "kubeconfigSize", len(kubeconfig))
+	log.Info("Successfully retrieved kubeconfig", "nodeIP", sshHost, "kubeconfigSize", len(kubeconfig))
 	return kubeconfig, nil
 }
 
@@ -1144,6 +1155,11 @@ func (r *KairosControlPlaneReconciler) getNodeIP(ctx context.Context, log logr.L
 		}
 
 		if ip := r.extractIPFromUnstructured(kubevirtMachine); ip != "" {
+			return ip, nil
+		}
+
+		if ip, err := r.getKubevirtVMIIP(ctx, log, machine); err == nil && ip != "" {
+			log.Info("Resolved KubeVirt VMI IP", "machine", machine.Name, "ip", ip)
 			return ip, nil
 		}
 
@@ -1212,6 +1228,74 @@ func (r *KairosControlPlaneReconciler) extractIPFromUnstructured(obj *unstructur
 	}
 
 	return ""
+}
+
+func (r *KairosControlPlaneReconciler) getKubevirtVMIIP(ctx context.Context, log logr.Logger, machine *clusterv1.Machine) (string, error) {
+	if machine == nil {
+		return "", fmt.Errorf("machine is nil")
+	}
+
+	vmi := &unstructured.Unstructured{}
+	vmi.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "kubevirt.io",
+		Version: "v1",
+		Kind:    "VirtualMachineInstance",
+	})
+	vmiKey := types.NamespacedName{
+		Name:      machine.Spec.InfrastructureRef.Name,
+		Namespace: machine.Spec.InfrastructureRef.Namespace,
+	}
+	if err := r.Get(ctx, vmiKey, vmi); err != nil {
+		return "", fmt.Errorf("failed to get VMI: %w", err)
+	}
+
+	interfaces, found, err := unstructured.NestedSlice(vmi.Object, "status", "interfaces")
+	if err != nil || !found {
+		return "", fmt.Errorf("VMI interfaces not found")
+	}
+
+	for _, iface := range interfaces {
+		if ifaceMap, ok := iface.(map[string]interface{}); ok {
+			if ip, ok := ifaceMap["ipAddress"].(string); ok && ip != "" {
+				return ip, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no IP address found in VMI status.interfaces")
+}
+
+func resolveSSHHost(machine *clusterv1.Machine, cluster *clusterv1.Cluster, nodeIP string, nodeErr error, log logr.Logger) (string, error) {
+	if nodeIP != "" {
+		return nodeIP, nil
+	}
+
+	if isKubevirtMachine(machine) && cluster != nil {
+		fallbackHost := cluster.Spec.ControlPlaneEndpoint.Host
+		if isValidEndpointHost(fallbackHost) {
+			log.Info("Using controlPlaneEndpoint host for KubeVirt SSH fallback", "host", fallbackHost, "machine", machine.Name)
+			return fallbackHost, nil
+		}
+	}
+
+	if nodeErr != nil {
+		return "", nodeErr
+	}
+
+	return "", fmt.Errorf("node IP not available yet")
+}
+
+func isKubevirtMachine(machine *clusterv1.Machine) bool {
+	if machine == nil {
+		return false
+	}
+
+	kind := machine.Spec.InfrastructureRef.Kind
+	return kind == "KubevirtMachine" || kind == "KubeVirtMachine"
+}
+
+func isValidEndpointHost(host string) bool {
+	return host != "" && host != "0.0.0.0" && host != "::"
 }
 
 // getSSHCredentials retrieves SSH credentials from KairosConfig
@@ -1443,11 +1527,15 @@ func (r *KairosControlPlaneReconciler) updateClusterStatus(ctx context.Context, 
 		log.V(4).Info("No machines found")
 	} else {
 		log.V(4).Info("Found machines", "count", len(machines))
+		isKubevirt := false
 		// Find the first machine with an IP address
 		// Try machine.Status.Addresses first, then fallback to VSphereMachine/VSphereVM
 		for _, machine := range machines {
 			log.V(4).Info("Checking machine", "machine", machine.Name, "addressCount", len(machine.Status.Addresses))
 			var controlPlaneAddress string
+			if isKubevirtMachine(machine) {
+				isKubevirt = true
+			}
 
 			// First, try machine.Status.Addresses (if populated)
 			if len(machine.Status.Addresses) > 0 {
@@ -1481,17 +1569,38 @@ func (r *KairosControlPlaneReconciler) updateClusterStatus(ctx context.Context, 
 				}
 			}
 
-			if controlPlaneAddress != "" && (currentHost == "" || currentPort == 0) {
-				// Set controlPlaneEndpoint if not already set
-				clusterToPatch.Spec.ControlPlaneEndpoint.Host = controlPlaneAddress
-				clusterToPatch.Spec.ControlPlaneEndpoint.Port = 6443 // Default k0s API server port
-				needsSpecUpdate = true
-				log.Info("Setting controlPlaneEndpoint", "cluster", clusterToPatch.Name, "host", controlPlaneAddress, "port", 6443)
-				break
-			} else if controlPlaneAddress == "" {
-				log.V(4).Info("No IP or hostname found for machine", "machine", machine.Name)
-			} else {
+			if controlPlaneAddress != "" {
+				// For KubeVirt, prefer the VM/VMI IP even if a different endpoint is already set.
+				// This avoids stale service/pod IPs that are not reachable from the management plane.
+				shouldUpdate := currentHost == "" || currentPort == 0
+				if isKubevirt && currentHost != controlPlaneAddress {
+					shouldUpdate = true
+				}
+				if shouldUpdate {
+					clusterToPatch.Spec.ControlPlaneEndpoint.Host = controlPlaneAddress
+					clusterToPatch.Spec.ControlPlaneEndpoint.Port = 6443 // Default k0s API server port
+					needsSpecUpdate = true
+					log.Info("Setting controlPlaneEndpoint", "cluster", clusterToPatch.Name, "host", controlPlaneAddress, "port", 6443)
+					break
+				}
 				log.V(4).Info("controlPlaneEndpoint already set", "currentHost", currentHost, "currentPort", currentPort)
+			} else {
+				log.V(4).Info("No IP or hostname found for machine", "machine", machine.Name)
+			}
+		}
+
+		// Ensure kubeconfig server matches the chosen controlPlaneEndpoint for KubeVirt.
+		// This allows the Machine controller to reach the workload API server.
+		if isKubevirt {
+			desiredHost := clusterToPatch.Spec.ControlPlaneEndpoint.Host
+			desiredPort := clusterToPatch.Spec.ControlPlaneEndpoint.Port
+			if desiredHost != "" && desiredPort != 0 {
+				updated, err := r.ensureKubeconfigServer(ctx, log, secret, desiredHost, desiredPort)
+				if err != nil {
+					log.Error(err, "Failed to ensure kubeconfig server", "cluster", clusterToPatch.Name)
+				} else if updated {
+					log.Info("Updated kubeconfig server to match controlPlaneEndpoint", "cluster", clusterToPatch.Name, "host", desiredHost, "port", desiredPort)
+				}
 			}
 		}
 	}
@@ -1527,6 +1636,63 @@ func (r *KairosControlPlaneReconciler) updateClusterStatus(ctx context.Context, 
 	// Attempting to set these conditions directly causes reconcile loops and conflicts.
 
 	return nil
+}
+
+// ensureKubeconfigServer updates the kubeconfig secret server to match the given endpoint.
+func (r *KairosControlPlaneReconciler) ensureKubeconfigServer(ctx context.Context, log logr.Logger, secret *corev1.Secret, host string, port int32) (bool, error) {
+	if host == "" || port == 0 {
+		return false, nil
+	}
+
+	kubeconfig, ok := secret.Data["value"]
+	if !ok || len(kubeconfig) == 0 {
+		return false, nil
+	}
+
+	config, err := clientcmd.Load(kubeconfig)
+	if err != nil {
+		return false, fmt.Errorf("failed to parse kubeconfig: %w", err)
+	}
+
+	desired := fmt.Sprintf("https://%s:%d", host, port)
+	changed := false
+	for _, cluster := range config.Clusters {
+		if cluster == nil {
+			continue
+		}
+		if cluster.Server == "" {
+			cluster.Server = desired
+			changed = true
+			continue
+		}
+		parsed, err := url.Parse(cluster.Server)
+		if err != nil {
+			cluster.Server = desired
+			changed = true
+			continue
+		}
+		if parsed.Host != fmt.Sprintf("%s:%d", host, port) {
+			cluster.Server = desired
+			changed = true
+		}
+	}
+
+	if !changed {
+		return false, nil
+	}
+
+	out, err := clientcmd.Write(*config)
+	if err != nil {
+		return false, fmt.Errorf("failed to serialize kubeconfig: %w", err)
+	}
+
+	secretCopy := secret.DeepCopy()
+	secretCopy.Data["value"] = out
+	if err := r.Update(ctx, secretCopy); err != nil {
+		return false, fmt.Errorf("failed to update kubeconfig secret: %w", err)
+	}
+
+	return true, nil
 }
 
 // triggerClusterReconciliation updates a Cluster annotation to trigger Cluster controller reconciliation
@@ -1596,6 +1762,13 @@ func (r *KairosControlPlaneReconciler) SetupWithManager(mgr ctrl.Manager) error 
 			&clusterv1.Cluster{},
 			handler.EnqueueRequestsFromMapFunc(r.clusterToKairosControlPlane),
 		).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.secretToKairosControlPlane),
+			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+				return strings.HasSuffix(obj.GetName(), "-kubeconfig")
+			})),
+		).
 		Complete(r)
 }
 
@@ -1664,6 +1837,42 @@ func (r *KairosControlPlaneReconciler) clusterToKairosControlPlane(ctx context.C
 			NamespacedName: types.NamespacedName{
 				Name:      cluster.Spec.ControlPlaneRef.Name,
 				Namespace: cluster.Namespace,
+			},
+		},
+	}
+}
+
+// secretToKairosControlPlane maps a kubeconfig Secret to its KairosControlPlane.
+// This ensures KCP reconciles when kubeconfig is pushed from the VM.
+func (r *KairosControlPlaneReconciler) secretToKairosControlPlane(ctx context.Context, o client.Object) []reconcile.Request {
+	secret, ok := o.(*corev1.Secret)
+	if !ok {
+		return nil
+	}
+
+	if !strings.HasSuffix(secret.Name, "-kubeconfig") {
+		return nil
+	}
+
+	clusterName := strings.TrimSuffix(secret.Name, "-kubeconfig")
+	if clusterName == "" {
+		return nil
+	}
+
+	cluster := &clusterv1.Cluster{}
+	if err := r.Get(ctx, types.NamespacedName{Name: clusterName, Namespace: secret.Namespace}, cluster); err != nil {
+		return nil
+	}
+
+	if cluster.Spec.ControlPlaneRef == nil || cluster.Spec.ControlPlaneRef.Kind != "KairosControlPlane" {
+		return nil
+	}
+
+	return []reconcile.Request{
+		{
+			NamespacedName: types.NamespacedName{
+				Name:      cluster.Spec.ControlPlaneRef.Name,
+				Namespace: secret.Namespace,
 			},
 		},
 	}

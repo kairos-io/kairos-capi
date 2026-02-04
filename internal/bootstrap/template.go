@@ -45,9 +45,15 @@ type TemplateData struct {
 	DNSServers     []string
 	PodCIDR        string
 	ServiceCIDR    string
+	PrimaryIP      string
 	IsKubeVirt     bool
 	Install        *InstallConfig
 	ProviderID     string // ProviderID for the Node (e.g., "vsphere://<vm-uuid>")
+	// Management cluster push config for KubeVirt (non-SSH kubeconfig retrieval)
+	ManagementKubeconfigToken           string
+	ManagementKubeconfigSecretName      string
+	ManagementKubeconfigSecretNamespace string
+	ManagementAPIServer                 string
 }
 
 // InstallConfig holds installation configuration for the template

@@ -19,19 +19,23 @@ package bootstrap
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/conditions"
@@ -49,7 +53,8 @@ import (
 // KairosConfigReconciler reconciles a KairosConfig object
 type KairosConfigReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme     *runtime.Scheme
+	RESTConfig *rest.Config
 }
 
 //+kubebuilder:rbac:groups=bootstrap.cluster.x-k8s.io,resources=kairosconfigs,verbs=get;list;watch;create;update;patch;delete
@@ -60,6 +65,8 @@ type KairosConfigReconciler struct {
 //+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=vspheremachines,verbs=get;list;watch
 //+kubebuilder:rbac:groups=infrastructure.cluster.x-k8s.io,resources=vspheremachines/status,verbs=get
 //+kubebuilder:rbac:groups="",resources=secrets;events,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups="",resources=serviceaccounts;serviceaccounts/token,verbs=get;list;watch;create;update;patch
+//+kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch
 //+kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
 //+kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=create;get;list;update;patch;watch
 //+kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get;list;watch
@@ -263,6 +270,31 @@ func (r *KairosConfigReconciler) reconcileBootstrapData(ctx context.Context, log
 		}
 	}
 
+	// If Machine has a bootstrap dataSecretName that differs from status, align to Machine to avoid duplicates.
+	if machine != nil && machine.Spec.Bootstrap.DataSecretName != nil && *machine.Spec.Bootstrap.DataSecretName != "" &&
+		kairosConfig.Status.DataSecretName != nil && *kairosConfig.Status.DataSecretName != "" &&
+		*machine.Spec.Bootstrap.DataSecretName != *kairosConfig.Status.DataSecretName {
+		oldSecretName := *kairosConfig.Status.DataSecretName
+		newSecretName := *machine.Spec.Bootstrap.DataSecretName
+		log.Info("Bootstrap secret name mismatch; aligning to Machine",
+			"oldSecret", oldSecretName,
+			"newSecret", newSecretName,
+			"machine", machine.Name)
+
+		oldSecret := &corev1.Secret{}
+		oldKey := types.NamespacedName{Name: oldSecretName, Namespace: kairosConfig.Namespace}
+		if err := r.Get(ctx, oldKey, oldSecret); err == nil {
+			_ = r.Delete(ctx, oldSecret)
+		}
+		oldUserdata := &corev1.Secret{}
+		oldUserdataKey := types.NamespacedName{Name: fmt.Sprintf("%s-userdata", oldSecretName), Namespace: kairosConfig.Namespace}
+		if err := r.Get(ctx, oldUserdataKey, oldUserdata); err == nil {
+			_ = r.Delete(ctx, oldUserdata)
+		}
+
+		kairosConfig.Status.DataSecretName = nil
+	}
+
 	// If dataSecretName is already set, verify the secret exists and check if regeneration is needed
 	if kairosConfig.Status.DataSecretName != nil {
 		secret := &corev1.Secret{}
@@ -290,30 +322,23 @@ func (r *KairosConfigReconciler) reconcileBootstrapData(ctx context.Context, log
 					log.Info("Bootstrap secret missing data, regenerating", "secret", *kairosConfig.Status.DataSecretName)
 					needsRegeneration = true
 				} else {
-					// Kubernetes secrets store data as base64-encoded strings
-					// Decode once to get the plain cloud-config YAML
-					decodedData, err := base64.StdEncoding.DecodeString(string(secretData))
-					if err != nil {
-						log.Info("Failed to decode bootstrap secret, regenerating", "secret", *kairosConfig.Status.DataSecretName, "error", err)
+					// Kubernetes Secrets are stored base64-encoded in etcd, but client-go
+					// already decodes them into Secret.Data. Treat it as plain text.
+					cloudConfigStr := string(secretData)
+					// Check if providerID is present in the script
+					hasProviderIDInSecret := strings.Contains(cloudConfigStr, currentProviderID)
+
+					// Check if there's a k0s post-bootstrap service (indicating providerID was included)
+					// If Machine has providerID but secret has no service, we need to regenerate
+					hasK0sPostBootstrapService := strings.Contains(cloudConfigStr, "kairos-k0s-post-bootstrap.service")
+
+					if currentProviderID != "" && (!hasProviderIDInSecret || !hasK0sPostBootstrapService) {
+						log.Info("Bootstrap secret missing providerID in k0s post-bootstrap service, regenerating to include it",
+							"secret", *kairosConfig.Status.DataSecretName,
+							"providerID", currentProviderID,
+							"hasProviderIDInSecret", hasProviderIDInSecret,
+							"hasK0sPostBootstrapService", hasK0sPostBootstrapService)
 						needsRegeneration = true
-					} else {
-						// Check if the decoded cloud-config contains the providerID in the systemd service script
-						cloudConfigStr := string(decodedData)
-						// Check if providerID is present in the script
-						hasProviderIDInSecret := strings.Contains(cloudConfigStr, currentProviderID)
-
-						// Check if there's a k0s post-bootstrap service (indicating providerID was included)
-						// If Machine has providerID but secret has no service, we need to regenerate
-						hasK0sPostBootstrapService := strings.Contains(cloudConfigStr, "kairos-k0s-post-bootstrap.service")
-
-						if currentProviderID != "" && (!hasProviderIDInSecret || !hasK0sPostBootstrapService) {
-							log.Info("Bootstrap secret missing providerID in k0s post-bootstrap service, regenerating to include it",
-								"secret", *kairosConfig.Status.DataSecretName,
-								"providerID", currentProviderID,
-								"hasProviderIDInSecret", hasProviderIDInSecret,
-								"hasK0sPostBootstrapService", hasK0sPostBootstrapService)
-							needsRegeneration = true
-						}
 					}
 				}
 			}
@@ -528,6 +553,10 @@ func (r *KairosConfigReconciler) sanitizeCapkUserdataSecret(ctx context.Context,
 
 	secret.Data["userdata"] = []byte(updated)
 	if err := r.Update(ctx, secret); err != nil {
+		if apierrors.IsConflict(err) {
+			log.V(4).Info("CAPK userdata secret update conflicted; will retry on next reconcile", "secret", userdataSecretName)
+			return false, true, nil
+		}
 		return false, true, err
 	}
 
@@ -780,25 +809,45 @@ func (r *KairosConfigReconciler) generateK0sCloudConfig(ctx context.Context, log
 	// This is needed to set the Node's providerID so the Machine controller can match Nodes to Machines
 	providerID := r.getProviderID(ctx, log, machine)
 
+	var kubeconfigPush *kubeconfigPushConfig
+	if isKubevirtMachine(machine) && role == "control-plane" {
+		var err error
+		kubeconfigPush, err = r.ensureKubeconfigPushConfig(ctx, log, kairosConfig, cluster)
+		if err != nil {
+			return "", err
+		}
+	}
+
 	// Build template data
 	templateData := bootstrap.TemplateData{
-		Role:           role,
-		SingleNode:     singleNode,
-		Hostname:       hostname,
-		UserName:       userName,
-		UserPassword:   userPassword,
-		UserGroups:     userGroups,
-		GitHubUser:     kairosConfig.Spec.GitHubUser,
-		SSHPublicKey:   kairosConfig.Spec.SSHPublicKey,
-		WorkerToken:    workerToken,
-		Manifests:      kairosConfig.Spec.Manifests,
-		HostnamePrefix: hostnamePrefix,
-		DNSServers:     kairosConfig.Spec.DNSServers,
-		PodCIDR:        kairosConfig.Spec.PodCIDR,
-		ServiceCIDR:    kairosConfig.Spec.ServiceCIDR,
-		IsKubeVirt:     isKubevirtMachine(machine),
-		Install:        installConfig,
-		ProviderID:     providerID,
+		Role:                                role,
+		SingleNode:                          singleNode,
+		Hostname:                            hostname,
+		UserName:                            userName,
+		UserPassword:                        userPassword,
+		UserGroups:                          userGroups,
+		GitHubUser:                          kairosConfig.Spec.GitHubUser,
+		SSHPublicKey:                        kairosConfig.Spec.SSHPublicKey,
+		WorkerToken:                         workerToken,
+		Manifests:                           kairosConfig.Spec.Manifests,
+		HostnamePrefix:                      hostnamePrefix,
+		DNSServers:                          kairosConfig.Spec.DNSServers,
+		PodCIDR:                             kairosConfig.Spec.PodCIDR,
+		ServiceCIDR:                         kairosConfig.Spec.ServiceCIDR,
+		PrimaryIP:                           kairosConfig.Spec.PrimaryIP,
+		IsKubeVirt:                          isKubevirtMachine(machine),
+		Install:                             installConfig,
+		ProviderID:                          providerID,
+		ManagementKubeconfigToken:           "",
+		ManagementKubeconfigSecretName:      "",
+		ManagementKubeconfigSecretNamespace: "",
+		ManagementAPIServer:                 "",
+	}
+	if kubeconfigPush != nil {
+		templateData.ManagementKubeconfigToken = kubeconfigPush.Token
+		templateData.ManagementKubeconfigSecretName = kubeconfigPush.SecretName
+		templateData.ManagementKubeconfigSecretNamespace = kubeconfigPush.SecretNamespace
+		templateData.ManagementAPIServer = kubeconfigPush.APIServer
 	}
 
 	// Render template
@@ -828,6 +877,134 @@ func randomString(length int) (string, error) {
 		b[i] = charset[randomByte[0]%byte(len(charset))]
 	}
 	return string(b), nil
+}
+
+type kubeconfigPushConfig struct {
+	Token           string
+	APIServer       string
+	SecretName      string
+	SecretNamespace string
+}
+
+func (r *KairosConfigReconciler) ensureKubeconfigPushConfig(ctx context.Context, log logr.Logger, kairosConfig *bootstrapv1beta2.KairosConfig, cluster *clusterv1.Cluster) (*kubeconfigPushConfig, error) {
+	if r.RESTConfig == nil || r.RESTConfig.Host == "" {
+		log.Info("Skipping kubeconfig push config; REST config not available")
+		return nil, nil
+	}
+
+	secretName := fmt.Sprintf("%s-kubeconfig", cluster.Name)
+	saName := kubeconfigWriterName(cluster.Name)
+
+	serviceAccount := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      saName,
+			Namespace: cluster.Namespace,
+		},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, serviceAccount, func() error {
+		if serviceAccount.Labels == nil {
+			serviceAccount.Labels = map[string]string{}
+		}
+		serviceAccount.Labels[clusterv1.ClusterNameLabel] = cluster.Name
+		return controllerutil.SetControllerReference(kairosConfig, serviceAccount, r.Scheme)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to ensure kubeconfig writer serviceaccount: %w", err)
+	}
+
+	role := &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      saName,
+			Namespace: cluster.Namespace,
+		},
+	}
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, role, func() error {
+		role.Rules = []rbacv1.PolicyRule{
+			{
+				APIGroups:     []string{""},
+				Resources:     []string{"secrets"},
+				ResourceNames: []string{secretName},
+				Verbs:         []string{"get", "create", "update", "patch"},
+			},
+		}
+		if role.Labels == nil {
+			role.Labels = map[string]string{}
+		}
+		role.Labels[clusterv1.ClusterNameLabel] = cluster.Name
+		return controllerutil.SetControllerReference(kairosConfig, role, r.Scheme)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to ensure kubeconfig writer role: %w", err)
+	}
+
+	roleBinding := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      saName,
+			Namespace: cluster.Namespace,
+		},
+	}
+	_, err = controllerutil.CreateOrUpdate(ctx, r.Client, roleBinding, func() error {
+		roleBinding.RoleRef = rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "Role",
+			Name:     role.Name,
+		}
+		roleBinding.Subjects = []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      serviceAccount.Name,
+				Namespace: serviceAccount.Namespace,
+			},
+		}
+		if roleBinding.Labels == nil {
+			roleBinding.Labels = map[string]string{}
+		}
+		roleBinding.Labels[clusterv1.ClusterNameLabel] = cluster.Name
+		return controllerutil.SetControllerReference(kairosConfig, roleBinding, r.Scheme)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to ensure kubeconfig writer rolebinding: %w", err)
+	}
+
+	expirationSeconds := int64(24 * 60 * 60)
+	tokenRequest := &authenticationv1.TokenRequest{
+		Spec: authenticationv1.TokenRequestSpec{
+			Audiences:         []string{"https://kubernetes.default.svc"},
+			ExpirationSeconds: &expirationSeconds,
+		},
+	}
+	if err := r.SubResource("token").Create(ctx, serviceAccount, tokenRequest); err != nil {
+		return nil, fmt.Errorf("failed to create serviceaccount token: %w", err)
+	}
+	if tokenRequest.Status.Token == "" {
+		return nil, fmt.Errorf("serviceaccount token request returned empty token")
+	}
+
+	return &kubeconfigPushConfig{
+		Token:           tokenRequest.Status.Token,
+		APIServer:       r.RESTConfig.Host,
+		SecretName:      secretName,
+		SecretNamespace: cluster.Namespace,
+	}, nil
+}
+
+func kubeconfigWriterName(clusterName string) string {
+	base := "kairos-kubeconfig-writer"
+	name := fmt.Sprintf("%s-%s", base, clusterName)
+	if len(name) <= 63 {
+		return name
+	}
+	hash := sha1.Sum([]byte(clusterName))
+	suffix := hex.EncodeToString(hash[:6])
+	maxClusterLen := 63 - len(base) - len(suffix) - 2
+	if maxClusterLen < 1 {
+		maxClusterLen = 1
+	}
+	trimmed := clusterName
+	if len(trimmed) > maxClusterLen {
+		trimmed = trimmed[:maxClusterLen]
+	}
+	return fmt.Sprintf("%s-%s-%s", base, trimmed, suffix)
 }
 
 // SetupWithManager sets up the controller with the Manager.
