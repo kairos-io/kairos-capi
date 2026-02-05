@@ -41,7 +41,21 @@ func TestGenerateK0sCloudConfig_ControlPlaneSingleNode(t *testing.T) {
 	g.Expect(clusterv1.AddToScheme(scheme)).To(Succeed())
 	g.Expect(corev1.AddToScheme(scheme)).To(Succeed())
 
-	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	lbService := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster-control-plane-lb",
+			Namespace: "default",
+		},
+		Status: corev1.ServiceStatus{
+			LoadBalancer: corev1.LoadBalancerStatus{
+				Ingress: []corev1.LoadBalancerIngress{
+					{IP: "192.0.2.10"},
+				},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(lbService).Build()
 	reconciler := &KairosConfigReconciler{
 		Client: client,
 		Scheme: scheme,
@@ -103,7 +117,21 @@ func TestGenerateK0sCloudConfig_ControlPlaneWithCIDRs(t *testing.T) {
 	g.Expect(clusterv1.AddToScheme(scheme)).To(Succeed())
 	g.Expect(corev1.AddToScheme(scheme)).To(Succeed())
 
-	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	lbService := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster-control-plane-lb",
+			Namespace: "default",
+		},
+		Status: corev1.ServiceStatus{
+			LoadBalancer: corev1.LoadBalancerStatus{
+				Ingress: []corev1.LoadBalancerIngress{
+					{IP: "192.0.2.10"},
+				},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(lbService).Build()
 	reconciler := &KairosConfigReconciler{
 		Client: client,
 		Scheme: scheme,
@@ -165,7 +193,21 @@ func TestGenerateK0sCloudConfig_ControlPlaneKubeVirtBootstrapTrap(t *testing.T) 
 	g.Expect(clusterv1.AddToScheme(scheme)).To(Succeed())
 	g.Expect(corev1.AddToScheme(scheme)).To(Succeed())
 
-	client := fake.NewClientBuilder().WithScheme(scheme).Build()
+	lbService := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-cluster-control-plane-lb",
+			Namespace: "default",
+		},
+		Status: corev1.ServiceStatus{
+			LoadBalancer: corev1.LoadBalancerStatus{
+				Ingress: []corev1.LoadBalancerIngress{
+					{IP: "192.0.2.10"},
+				},
+			},
+		},
+	}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(lbService).Build()
 	reconciler := &KairosConfigReconciler{
 		Client: client,
 		Scheme: scheme,
@@ -722,8 +764,8 @@ func TestGenerateK0sCloudConfig_HostnameTemplating(t *testing.T) {
 	)
 
 	g.Expect(err).NotTo(HaveOccurred())
-	// Verify Kairos templating is preserved (not Go templating)
-	g.Expect(cloudConfig).To(ContainSubstring("hostname: metal-{{ trunc 4 .MachineID }}"))
+	// Verify hostname defaults to Machine name when no explicit hostname is set
+	g.Expect(cloudConfig).To(ContainSubstring("hostname: test-machine"))
 	// Should NOT contain Go template syntax
 	g.Expect(cloudConfig).NotTo(ContainSubstring("{{.MachineID}}"))
 }
