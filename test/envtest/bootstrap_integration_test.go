@@ -32,8 +32,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
-	bootstrapv1beta2 "github.com/wrkode/kairos-capi/api/bootstrap/v1beta2"
-	"github.com/wrkode/kairos-capi/internal/controllers/bootstrap"
+	bootstrapv1beta2 "github.com/kairos-io/kairos-capi/api/bootstrap/v1beta2"
+	"github.com/kairos-io/kairos-capi/internal/controllers/bootstrap"
 )
 
 func TestBootstrapIntegration(t *testing.T) {

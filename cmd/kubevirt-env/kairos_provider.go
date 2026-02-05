@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	kairosCapiImg = "ghcr.io/wrkode/kairos-capi:latest"
+	kairosCapiImg = "ghcr.io/kairos-io/kairos-capi:latest"
 )
 
 func newInstallKairosProviderCmd() *cobra.Command {

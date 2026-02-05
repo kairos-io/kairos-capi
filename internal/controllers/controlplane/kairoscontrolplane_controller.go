@@ -50,9 +50,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	bootstrapv1beta2 "github.com/wrkode/kairos-capi/api/bootstrap/v1beta2"
-	controlplanev1beta2 "github.com/wrkode/kairos-capi/api/controlplane/v1beta2"
-	"github.com/wrkode/kairos-capi/internal/infrastructure"
+	bootstrapv1beta2 "github.com/kairos-io/kairos-capi/api/bootstrap/v1beta2"
+	controlplanev1beta2 "github.com/kairos-io/kairos-capi/api/controlplane/v1beta2"
+	"github.com/kairos-io/kairos-capi/internal/infrastructure"
 )
 
 // KairosControlPlaneReconciler reconciles a KairosControlPlane object

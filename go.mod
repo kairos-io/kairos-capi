@@ -1,4 +1,4 @@
-module github.com/wrkode/kairos-capi
+module github.com/kairos-io/kairos-capi
 
 go 1.24.0
 
