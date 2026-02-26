@@ -35,7 +35,8 @@ spec:
     apiGroup: controlplane.cluster.x-k8s.io
     kind: KairosControlPlane
     name: kairos-control-plane-kv-capk
-  # Required for k3s workers: set a stable API endpoint
+  # controlPlaneEndpoint is auto-populated by the controller from the LoadBalancer Service.
+  # Placeholder required for initial apply; MetalLB or similar assigns the LB IP.
   controlPlaneEndpoint:
     host: "TODO-REPLACE-WITH-LB-OR-VIP"
     port: 6443
