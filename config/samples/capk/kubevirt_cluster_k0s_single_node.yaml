@@ -68,6 +68,9 @@ metadata:
 spec:
   template:
     spec:
+      # Bypass SSH sentinel check - kubeconfig push avoids SSH; SSH may fail in bridged setups
+      virtualMachineBootstrapCheck:
+        checkStrategy: none
       virtualMachineTemplate:
         spec:
           runStrategy: Always

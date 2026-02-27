@@ -367,6 +367,7 @@ stages:
     {{- end }}
 
 runcmd:
+{{- if .IsKubeVirt }}
   - /bin/systemctl daemon-reload || true
   - /bin/systemctl enable kairos-k3s-post-bootstrap.service || true
-  - /bin/systemctl start kairos-k3s-post-bootstrap.service || true
+{{- end }}

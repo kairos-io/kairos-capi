@@ -38,7 +38,7 @@ spec:
   # controlPlaneEndpoint is auto-populated by the controller from the LoadBalancer Service.
   # Placeholder required for initial apply; MetalLB or similar assigns the LB IP.
   controlPlaneEndpoint:
-    host: "TODO-REPLACE-WITH-LB-OR-VIP"
+    host: "PLACEHOLDER-FOR-LB-IP"
     port: 6443
 ---
 apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
@@ -74,6 +74,9 @@ metadata:
 spec:
   template:
     spec:
+      # Bypass SSH sentinel check - kubeconfig push avoids SSH; SSH may fail in bridged setups
+      virtualMachineBootstrapCheck:
+        checkStrategy: none
       virtualMachineTemplate:
         spec:
           runStrategy: Always
