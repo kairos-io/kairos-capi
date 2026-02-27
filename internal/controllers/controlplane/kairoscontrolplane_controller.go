@@ -1128,6 +1128,13 @@ func (r *KairosControlPlaneReconciler) getInfrastructureProviderID(ctx context.C
 		if providerID, found, err := unstructured.NestedString(kubevirtMachine.Object, "spec", "providerID"); err == nil && found && providerID != "" {
 			return providerID
 		}
+		if providerID, found, err := unstructured.NestedString(kubevirtMachine.Object, "status", "providerID"); err == nil && found && providerID != "" {
+			return providerID
+		}
+		// CAPK uses kubevirt://<KubevirtMachine.Name>; construct when VMI exists
+		if _, err := r.getKubevirtVMIIP(ctx, log, machine); err == nil {
+			return fmt.Sprintf("kubevirt://%s", kubevirtMachineKey.Name)
+		}
 	case "DockerMachine":
 		dockerMachine := &unstructured.Unstructured{}
 		dockerMachine.SetGroupVersionKind(machine.Spec.InfrastructureRef.GroupVersionKind())

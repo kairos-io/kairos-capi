@@ -401,6 +401,9 @@ func TestRenderK3sCloudConfig_CapkKubeconfigPush(t *testing.T) {
 	if !strings.Contains(result, "https://10.0.0.1:6443") {
 		t.Error("Missing ControlPlaneLBEndpoint in kubeconfig server URL replacement")
 	}
+	if !strings.Contains(result, "systemctl start kairos-k3s-post-bootstrap.service") {
+		t.Error("Missing systemctl start for k3s post-bootstrap service in runcmd (required for kubeconfig push)")
+	}
 }
 
 func TestRenderK3sCloudConfig_CapkTlsSan(t *testing.T) {

@@ -162,23 +162,21 @@ write_files:
       #!/bin/bash
       set -e
       PROVIDER_ID=""
-      # Try DMI product_uuid first (KubeVirt VMs may expose UUID)
-      if [ -f /sys/class/dmi/id/product_uuid ]; then
+      # Prefer hostname: CAPK uses kubevirt://<vm-name> and hostname matches KubevirtMachine/VM name
+      {{- if .Hostname }}
+      PROVIDER_ID="kubevirt://{{ .Hostname }}"
+      echo "Discovered providerID: $PROVIDER_ID (hostname)"
+      {{- end }}
+      # Fallback: DMI product_uuid (KubeVirt VMs may expose UUID; only if hostname not available)
+      if [ -z "$PROVIDER_ID" ] && [ -f /sys/class/dmi/id/product_uuid ]; then
         RAW=$(cat /sys/class/dmi/id/product_uuid | tr -d ' \n\r')
         HEX=$(echo "$RAW" | tr -d '-' | tr '[:upper:]' '[:lower:]')
         if [ -n "$HEX" ] && [ ${#HEX} -eq 32 ]; then
           FORMATTED="${HEX:0:8}-${HEX:8:4}-${HEX:12:4}-${HEX:16:4}-${HEX:20:12}"
           PROVIDER_ID="kubevirt://${FORMATTED}"
-          echo "Discovered providerID: $PROVIDER_ID"
+          echo "Discovered providerID: $PROVIDER_ID (DMI)"
         fi
       fi
-      # Fallback: CAPK often uses kubevirt://namespace/vm-name (hostname usually matches vm name)
-      {{- if and .ClusterNS .Hostname }}
-      if [ -z "$PROVIDER_ID" ]; then
-        PROVIDER_ID="kubevirt://{{ .ClusterNS }}/{{ .Hostname }}"
-        echo "Discovered providerID: $PROVIDER_ID (fallback)"
-      fi
-      {{- end }}
       if [ -n "$PROVIDER_ID" ]; then
         mkdir -p /etc/rancher/k3s/config.yaml.d
         printf "kubelet-arg:\n  - provider-id=%s\n" "$PROVIDER_ID" > /etc/rancher/k3s/config.yaml.d/90-provider-id.yaml
@@ -371,3 +369,4 @@ stages:
 runcmd:
   - /bin/systemctl daemon-reload || true
   - /bin/systemctl enable kairos-k3s-post-bootstrap.service || true
+  - /bin/systemctl start kairos-k3s-post-bootstrap.service || true
