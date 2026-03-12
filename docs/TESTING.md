@@ -26,4 +26,4 @@ make test-envtest
 
 `make test-envtest` installs setup-envtest if needed, downloads assets, and runs envtest-tagged tests.
 
-CI currently tests against both Go 1.24 and 1.25 for one-cycle compatibility. After confirming stability, the matrix can be reduced to Go 1.25 only.
+CI tests against Go 1.25.7. The 1.24/1.25 matrix was removed due to covdata/toolchain compatibility issues (golang/go#75031).
