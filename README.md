@@ -1,3 +1,7 @@
+---
+**NOTE: This repository has been merged with the previously existing: https://github.com/kairos-io/cluster-api-provider-kairos to avoid any confusion. There is only one place for Kairos CAPI providers.**
+---
+
 # Kairos CAPI Provider
 
 **Cluster API providers for Kairos OS.**
